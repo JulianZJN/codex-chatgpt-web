@@ -1,0 +1,85 @@
+name: PR 439 polish
+
+on:
+  push:
+    branches:
+      - tmp/pr439-audit-20260911
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: pr439-polish
+  cancel-in-progress: false
+
+jobs:
+  polish-and-verify:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out staging branch
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Preserve patch script and check out PR branch
+        shell: bash
+        run: |
+          set -euo pipefail
+          cp .github/pr439_polish.py /tmp/pr439_polish.py
+          git fetch origin feat/pro-model-version-selection
+          git checkout -B feat/pro-model-version-selection origin/feat/pro-model-version-selection
+          test "$(git rev-parse HEAD)" = "406226a6a8aadc16a0efc2f86e8e52748cd29d01"
+          git remote add upstream https://github.com/miuuyy/codex-chatgpt-web.git || true
+          git fetch upstream main
+          git rebase upstream/main
+          python3 /tmp/pr439_polish.py
+          git diff --check
+          test "$(git diff --name-only | sort)" = $'src/adapters/chatgpt-web/browser-worker.ts\ntests/pro-model-selection.test.ts'
+
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.0
+
+      - name: Install root dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Install launcher dependencies
+        working-directory: launcher
+        run: bun install --frozen-lockfile
+
+      - name: Run focused Pro model regression tests
+        run: bun test tests/pro-model-selection.test.ts
+
+      - name: Run full root test suite
+        run: bun test ./tests
+
+      - name: Run root typecheck
+        run: bun run typecheck
+
+      - name: Run launcher tests
+        run: bun run launcher:test
+
+      - name: Run launcher typecheck and renderer build
+        run: bun run launcher:build
+
+      - name: Run runtime and release smoke checks
+        run: |
+          bun run check-version
+          bun run licenses
+          bun run build
+          bun run smoke
+
+      - name: Publish verified single-commit branch
+        shell: bash
+        run: |
+          set -euo pipefail
+          git diff --check
+          test "$(git diff --name-only | sort)" = $'src/adapters/chatgpt-web/browser-worker.ts\ntests/pro-model-selection.test.ts'
+          git config user.name "JulianZJN"
+          git config user.email "JulianZJN@users.noreply.github.com"
+          git add src/adapters/chatgpt-web/browser-worker.ts tests/pro-model-selection.test.ts
+          git diff --cached --check
+          git commit --amend --no-edit
+          git push --force-with-lease origin HEAD:feat/pro-model-version-selection
