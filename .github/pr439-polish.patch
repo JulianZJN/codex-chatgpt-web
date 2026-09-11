@@ -1,0 +1,232 @@
+--- a/src/adapters/chatgpt-web/browser-worker.ts
++++ b/src/adapters/chatgpt-web/browser-worker.ts
+@@ -214,6 +214,29 @@
+   );
+ }
+ 
++function chatGptProModelOptionName(version: ChatGptWebProModelVersion): RegExp {
++  if (version === "5.6") return /^GPT[-\s]?5\.6\s+Sol(?:\s+Pro)?$/i;
++  if (version === "5.5") return /^GPT[-\s]?5\.5(?:\s+Pro)?$/i;
++  return /^(?:Latest|最新|GPT[-\s]?6(?:\s+Astra)?(?:\s+Pro)?)$/i;
++}
++
++function chatGptModelStateMatches(
++  descriptions: readonly string[],
++  version: ChatGptWebProModelVersion,
++  requirePro: boolean,
++): boolean {
++  const escapedVersion = version.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
++  const versionPrefix = new RegExp(
++    `^(?:GPT[-\\s]?)?${escapedVersion}(?=$|\\s|[,，:：;；()（）·•—–-])`,
++    "i",
++  );
++  return descriptions.some(description => {
++    const normalized = description.replace(/\s+/g, " ").trim();
++    return versionPrefix.test(normalized)
++      && (!requirePro || /\bPro\b/i.test(normalized));
++  });
++}
++
+ async function assertChatGptSelectedModelVersion(
+   page: Page,
+   slider: Locator,
+@@ -224,11 +247,16 @@
+   // version/effort through aria-describedby, not aria-valuetext on the slider.
+   const keyboardControl = slider.locator("xpath=ancestor::*[@role='menuitem'][1]");
+   const descriptionIds = (await keyboardControl.getAttribute("aria-describedby"))?.trim().split(/\s+/).filter(Boolean) ?? [];
+-  const label = (await page.evaluate(ids => ids.map(id => document.getElementById(id)?.textContent ?? "").join(" "), descriptionIds)).trim();
++  const descriptions = await page.evaluate(
++    ids => ids
++      .map(id => document.getElementById(id)?.textContent?.trim() ?? "")
++      .filter(Boolean),
++    descriptionIds,
++  );
+   // "Latest" is not a version. Its slider must still prove 6; a future 7 fails closed.
+-  const prefix = version.replaceAll(".", "\\.");
+-  if (!new RegExp(`^(?:GPT[-\\s]?)?${prefix}(?:\\s|$)`, "i").test(label)
+-    || (requirePro && !/\bPro\b/i.test(label))) {
++  // Version and Pro must come from the same described state node: unrelated instructions
++  // mentioning Pro are not proof that the selected effort is actually Pro.
++  if (!chatGptModelStateMatches(descriptions, version, requirePro)) {
+     throw chatGptPinnedModelError(version);
+   }
+ }
+@@ -2395,8 +2423,7 @@
+     if (modelVersion) {
+       try {
+         await activation.menu.getByLabel(/^(?:Select model|Choose model|选择模型|モデルを選択)$/).click({ timeout: 5_000 });
+-        const modelName = modelVersion === "5.6" ? "GPT-5.6 Sol"
+-          : modelVersion === "5.5" ? "GPT-5.5" : /^(?:Latest|最新)$/;
++        const modelName = chatGptProModelOptionName(modelVersion);
+         const option = activation.menu.getByRole("menuitemradio", { name: modelName, exact: true });
+         await option.waitFor({ state: "visible", timeout: 5_000 });
+         await option.click({ timeout: 5_000 });
+@@ -3421,6 +3448,7 @@
+       // Connector attachment, file handling or a user action can reset the picker after selection.
+       // Recheck immediately before the irreversible send, without choosing a fallback model.
+       const control = composer.locator("xpath=ancestor::form[1]").locator(CHATGPT_EFFORT_CONTROL_SELECTOR).last();
++      let verificationError: ChatGptWebAdapterError | undefined;
+       try {
+         const { slider } = await activateChatGptEffortMenu(page, control);
+         await assertChatGptSelectedModelVersion(page, slider, expectedMode.modelVersion, expectedMode.effort === "max");
+@@ -3432,9 +3460,16 @@
+           throw chatGptPinnedModelError(expectedMode.modelVersion);
+         }
+       } catch (error) {
+-        throw chatGptPinnedModelError(expectedMode.modelVersion, error);
++        verificationError = chatGptPinnedModelError(expectedMode.modelVersion, error);
++        throw verificationError;
+       } finally {
+-        await page.keyboard.press("Escape");
++        try {
++          await page.keyboard.press("Escape");
++        } catch (cleanupError) {
++          // Preserve a safety-relevant model mismatch instead of replacing it with cleanup noise.
++          // After successful verification, however, a menu that cannot be closed still fails closed.
++          if (!verificationError) throw cleanupError;
++        }
+       }
+       if (abortSignal?.aborted) throw new DOMException("ChatGPT web turn aborted", "AbortError");
+     }
+--- a/tests/pro-model-selection.test.ts
++++ b/tests/pro-model-selection.test.ts
+@@ -8,8 +8,15 @@
+ 
+ // The live hidden slider has no aria-valuetext. The owned keyboard menuitem's
+ // aria-describedby references expose its actual version and effort (sanitized DOM fixture).
+-function picker(options: { unavailable?: boolean; actualVersion?: string; max?: number } = {}) {
++function picker(options: {
++  unavailable?: boolean;
++  actualVersion?: string;
++  max?: number;
++  descriptionTexts?: readonly string[];
++  modelOptions?: Array<{ role: string; name: string; version: string }>;
++} = {}) {
+   let version = "6", value = 0, submenu = false;
++  let keyboardFailure: string | undefined;
+   const actions: string[] = [];
+   const hidden = {
+     filter() { return this; }, last() { return this; }, getByText() { return this; },
+@@ -45,7 +52,7 @@
+     count: async () => 1, waitFor: async () => {},
+     click: async () => { submenu = true; actions.push("open-versions"); },
+   };
+-  const modelOptions = observedPicker.options;
++  const modelOptions = options.modelOptions ?? observedPicker.options;
+   const radio = (name: string | RegExp) => {
+     const option = modelOptions.find(option => typeof name === "string" ? option.name === name : name.test(option.name));
+     return {
+@@ -72,13 +79,31 @@
+   };
+   const composer = { locator: () => ({ locator: () => control }) };
+   const page = {
+-    evaluate: async (_fn: unknown, ids: string[]) => {
++    evaluate: async (fn: unknown, ids: string[]) => {
+       expect(ids).toEqual(["picker-value", "picker-instructions"]);
+-      return `${options.actualVersion ?? version} ${value === 4 ? "Pro" : "Instant"}，第 ${value + 1} 项，共 5 项。 ${observedPicker.descriptions["picker-instructions"]}`;
++      const descriptions = options.descriptionTexts ?? [
++        `${options.actualVersion ?? version} ${value === 4 ? "Pro" : "Instant"}，第 ${value + 1} 项，共 5 项。`,
++        observedPicker.descriptions["picker-instructions"],
++      ];
++      const previousDocument = (globalThis as any).document;
++      (globalThis as any).document = {
++        getElementById: (id: string) => {
++          const index = ids.indexOf(id);
++          return index < 0 ? null : { textContent: descriptions[index] };
++        },
++      };
++      try {
++        return (fn as (descriptionIds: string[]) => unknown)(ids);
++      } finally {
++        if (previousDocument === undefined) delete (globalThis as any).document;
++        else (globalThis as any).document = previousDocument;
++      }
+     },
+     locator: (selector: string) => selector === '[id="picker"]' || selector === CHATGPT_EFFORT_MENU_SELECTOR ? menu
+       : selector === CHATGPT_EFFORT_SLIDER_CONTAINER_SELECTOR ? container : hidden,
+-    keyboard: { press: async () => {} },
++    keyboard: { press: async () => {
++      if (keyboardFailure) throw new Error(keyboardFailure);
++    } },
+     isClosed: () => false,
+   };
+   const select = (ChatGptBrowserWorker.prototype as unknown as {
+@@ -88,6 +113,7 @@
+     actions,
+     state: () => ({ version, value }),
+     setEffort: (next: number) => { value = next; },
++    failKeyboardCleanup: (message = "keyboard cleanup failed") => { keyboardFailure = message; },
+     select: (requested: string | undefined, effort = "max", stageVersion?: string) => select.call(
+       { activeComposer: async () => composer }, page, "gpt-5.6-sol", effort,
+       { localToolsEnabled: false, solAvailable: true, proAvailable: true, proModelVersion: requested },
+@@ -118,6 +144,48 @@
+   expect(fixture.actions.slice(2)).toEqual(Array(4).fill(`${version}:ArrowRight`));
+ });
+ 
++test("an explicit GPT-6 Astra option is accepted without weakening version proof", async () => {
++  const fixture = picker({
++    modelOptions: [
++      { role: "menuitemradio", name: "GPT-6 Astra", version: "6" },
++      ...observedPicker.options.filter(option => option.version !== "6"),
++    ],
++  });
++  await fixture.select("6");
++  expect(fixture.state()).toEqual({ version: "6", value: 4 });
++});
++
++test("nearby GPT-6 labels are not accepted as the pinned model", async () => {
++  const fixture = picker({
++    modelOptions: [
++      { role: "menuitemradio", name: "GPT-6 Mini", version: "6" },
++      ...observedPicker.options.filter(option => option.version !== "6"),
++    ],
++  });
++  await expect(fixture.select("6")).rejects.toThrow("6");
++});
++
++test("model-state verification is independent of aria-describedby order", async () => {
++  const fixture = picker({
++    descriptionTexts: [
++      observedPicker.descriptions["picker-instructions"],
++      "5.6 Pro，第 5 项，共 5 项。",
++    ],
++  });
++  await fixture.select("5.6");
++  expect(fixture.state()).toEqual({ version: "5.6", value: 4 });
++});
++
++test("an unrelated instruction mentioning Pro cannot validate an Instant state", async () => {
++  const fixture = picker({
++    descriptionTexts: [
++      "5.6 Instant，第 1 项，共 5 项。",
++      "Choose Pro for the most difficult tasks.",
++    ],
++  });
++  await expect(fixture.select("5.6")).rejects.toThrow("5.6");
++});
++
+ test("a missing version stops before any effort or submission can proceed", async () => {
+   const fixture = picker({ unavailable: true });
+   await expect(fixture.select("5.5")).rejects.toThrow("5.5");
+@@ -139,6 +207,21 @@
+   expect(fixture.actions).not.toContain("SEND");
+ });
+ 
++test("menu cleanup failure cannot mask a pre-send model mismatch", async () => {
++  const fixture = picker({ actualVersion: "6" });
++  fixture.failKeyboardCleanup();
++  await expect(fixture.send("5.6")).rejects.toThrow("5.6");
++  expect(fixture.actions).not.toContain("SEND");
++});
++
++test("menu cleanup failure still blocks a send after successful verification", async () => {
++  const fixture = picker();
++  await fixture.select("5.6");
++  fixture.failKeyboardCleanup();
++  await expect(fixture.send("5.6")).rejects.toThrow("keyboard cleanup failed");
++  expect(fixture.actions).not.toContain("SEND");
++});
++
+ test("a verified 5.6 Pro selection permits one send", async () => {
+   const fixture = picker();
+   await fixture.select("5.6");
