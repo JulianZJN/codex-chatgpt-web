@@ -1,0 +1,59 @@
+--- a/README.md
++++ b/README.md
+@@ -169,7 +169,8 @@
+ The choice applies to the next Pro turn without restarting Codex or the launcher; other efforts and
+ manual Zero Risk turns are unchanged. An unavailable or unverifiable version stops before sending
+-the pending prompt, with no fallback. GPT-6 uses **Latest** only while ChatGPT verifies it as 6 Pro.
++the pending prompt, with no fallback. GPT-6 accepts ChatGPT's **Latest** entry or an explicit
++**GPT-6 / GPT-6 Astra** entry, but the live control must still verify 6 Pro before submission.
+ 
+ New installs use **Compatibility V1** for cross-backend subagents. **Native** preserves Codex's own
+ feature settings and enables plaintext Web-to-Web V2 delegation. Restart Codex and start a new task
+--- a/README.zh-CN.md
++++ b/README.zh-CN.md
+@@ -155,7 +155,8 @@
+ **设置 → 自动化 Pro 模型**可将自动化 Pro 回合固定为 **GPT-5.6 Sol Pro**、**GPT-5.5 Pro**
+ 或 **GPT-6 Astra Pro**。默认的**跟随 ChatGPT**保留原有行为。选项从下一次 Pro 回合生效，
+ 无需重启 Codex 或启动器，不影响其他档位及手动 Zero Risk 回合。所选版本不可用或无法验证时，
+-会在发送当前提示词前报错，不会切换到其他版本；GPT-6 仅在验证显示为 6 Pro 时使用“最新”选项。
++会在发送当前提示词前报错，不会切换到其他版本。GPT-6 可匹配 ChatGPT 的“最新”或明确的
++**GPT-6 / GPT-6 Astra** 选项，但发送前实时控件仍必须验证为 6 Pro。
+ 
+ 新安装默认使用 **Compatibility V1** 以支持跨后端 subagent。**Native** 会保留 Codex 自身的
+ 功能设置，并启用明文 Web-to-Web V2 委派。切换协议后，请重启 Codex 并创建新任务：
+--- a/README.ja.md
++++ b/README.ja.md
+@@ -167,8 +167,9 @@
+ **GPT-6 Astra Pro** に固定できます。既定の **ChatGPT に合わせる**は従来の動作を維持します。
+ 次の Pro ターンから反映され、Codex やランチャーの再起動は不要です。他の推論レベルと手動の
+ Zero Risk ターンには影響しません。指定バージョンが利用できない、または確認できない場合は
+-送信前にエラーとなり、別のモデルへ切り替えません。GPT-6 は 6 Pro と確認できる場合のみ
+-**最新**を使用します。
++送信前にエラーとなり、別のモデルへ切り替えません。GPT-6 は ChatGPT の **最新**または明示的な
++**GPT-6 / GPT-6 Astra** 項目に一致できますが、送信前にライブコントロールが 6 Pro と確認できる
++ことが必須です。
+ 
+ 新規インストールでは、クロスバックエンドのサブエージェントに **Compatibility V1** を使用します。
+ **Native** は Codex 独自の機能設定を維持し、プレーンテキストの Web-to-Web V2 delegation を有効にします。
+--- a/docs/pro-model-selection.md
++++ b/docs/pro-model-selection.md
+@@ -13,8 +13,10 @@
+ The browser first selects the version, then moves the effort slider to Pro. Multipart preparation
+ stays on the selected version at its existing lower effort. Immediately before each send, the
+ browser rechecks the selected version and effort. Missing or changed controls fail without sending
+-the pending prompt or silently selecting another model. Selecting **Latest** for GPT-6 is not enough:
+-the slider must identify version 6, so a future Latest version cannot silently satisfy that pin.
++the pending prompt or silently selecting another model. Selecting **Latest** or an explicit
++**GPT-6 / GPT-6 Astra** option is not proof on its own: the slider must still identify version 6.
++This prevents a future Latest version or a nearby label such as GPT-6 Mini from silently satisfying
++the pin.
+@@ -51,8 +53,10 @@
+ 
+ `tests/pro-model-selection.test.ts` models that fixture at the browser locator boundary and
+ exercises the actual selection and pre-send methods. It covers every pinned version,
+-missing options, mismatched version labels, a future Latest version, multipart preparation, and a
+-picker reset before submission. Run it with:
++missing options, mismatched and nearby model labels, a future Latest version, multipart preparation,
++and a picker reset before submission. The regression suite also executes the real described-node
++parser against reordered targets, rejects unrelated instructional text containing `Pro`, and checks
++cleanup-error precedence at the final fail-closed send boundary. Run it with:
