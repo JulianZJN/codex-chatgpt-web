@@ -22,18 +22,19 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Preserve patch script and check out PR branch
+      - name: Preserve patch and check out PR branch
         shell: bash
         run: |
           set -euo pipefail
-          cp .github/pr439_polish.py /tmp/pr439_polish.py
+          cp .github/pr439-polish.patch /tmp/pr439-polish.patch
           git fetch origin feat/pro-model-version-selection
           git checkout -B feat/pro-model-version-selection origin/feat/pro-model-version-selection
           test "$(git rev-parse HEAD)" = "406226a6a8aadc16a0efc2f86e8e52748cd29d01"
           git remote add upstream https://github.com/miuuyy/codex-chatgpt-web.git || true
           git fetch upstream main
           git rebase upstream/main
-          python3 /tmp/pr439_polish.py
+          git apply --check /tmp/pr439-polish.patch
+          git apply /tmp/pr439-polish.patch
           git diff --check
           test "$(git diff --name-only | sort)" = $'src/adapters/chatgpt-web/browser-worker.ts\ntests/pro-model-selection.test.ts'
 
