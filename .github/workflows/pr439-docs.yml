@@ -1,0 +1,69 @@
+name: PR 439 documentation alignment
+
+on:
+  push:
+    branches:
+      - tmp/pr439-audit-20260911
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: pr439-docs
+  cancel-in-progress: false
+
+jobs:
+  align-and-verify:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out staging branch
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Preserve patch and check out PR branch
+        shell: bash
+        run: |
+          set -euo pipefail
+          cp .github/pr439-docs.patch /tmp/pr439-docs.patch
+          git fetch origin feat/pro-model-version-selection
+          git checkout -B feat/pro-model-version-selection origin/feat/pro-model-version-selection
+          test "$(git rev-parse HEAD)" = "039c385f09ba43eac398259eb6360ffe02ede75e"
+          git remote add upstream https://github.com/miuuyy/codex-chatgpt-web.git || true
+          git fetch upstream main
+          git rebase upstream/main
+          git apply --check /tmp/pr439-docs.patch
+          git apply /tmp/pr439-docs.patch
+          git diff --check
+          test "$(git diff --name-only | sort)" = $'README.ja.md\nREADME.md\nREADME.zh-CN.md\ndocs/pro-model-selection.md'
+
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.0
+
+      - name: Install root dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Run focused Pro model tests
+        run: bun test tests/pro-model-selection.test.ts tests/model-contract.test.ts
+
+      - name: Run full root test suite
+        run: bun test ./tests
+
+      - name: Run root typecheck
+        run: bun run typecheck
+
+      - name: Publish aligned single-commit branch
+        shell: bash
+        run: |
+          set -euo pipefail
+          git diff --check
+          test "$(git diff --name-only | sort)" = $'README.ja.md\nREADME.md\nREADME.zh-CN.md\ndocs/pro-model-selection.md'
+          git config user.name "JulianZJN"
+          git config user.email "JulianZJN@users.noreply.github.com"
+          git add README.md README.zh-CN.md README.ja.md docs/pro-model-selection.md
+          git diff --cached --check
+          git commit --amend --no-edit
+          git push --force-with-lease origin HEAD:feat/pro-model-version-selection
