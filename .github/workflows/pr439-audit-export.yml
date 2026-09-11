@@ -1,0 +1,25 @@
+name: PR 439 audit export
+
+on:
+  push:
+    branches:
+      - tmp/pr439-audit-20260911
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  export:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out audit branch
+        uses: actions/checkout@v4
+      - name: Archive source
+        run: tar --exclude=.git -czf /tmp/pr439-source.tgz .
+      - name: Upload source archive
+        uses: actions/upload-artifact@v4
+        with:
+          name: pr439-source
+          path: /tmp/pr439-source.tgz
+          if-no-files-found: error
