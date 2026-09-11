@@ -1,0 +1,41 @@
+name: PR 439 current verification
+
+on:
+  push:
+    branches:
+      - tmp/pr439-audit-20260911
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out PR branch
+        uses: actions/checkout@v6
+        with:
+          ref: feat/pro-model-version-selection
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.0
+      - name: Install root dependencies
+        run: bun install --frozen-lockfile
+      - name: Install launcher dependencies
+        run: bun install --frozen-lockfile
+        working-directory: launcher
+      - name: Root tests
+        run: bun test ./tests
+      - name: Root typecheck
+        run: bun run typecheck
+      - name: Launcher tests
+        run: bun run launcher:test
+      - name: Launcher typecheck and renderer build
+        run: bun run launcher:build
+      - name: Runtime bundle and release smoke
+        run: |
+          bun run check-version
+          bun run licenses
+          bun run build
+          bun run smoke
