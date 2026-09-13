@@ -5,11 +5,13 @@ import {
   closeSync,
   constants,
   existsSync,
+  fstatSync,
   mkdirSync,
   openSync,
   readFileSync,
   rmSync,
   statSync,
+  writeFileSync,
 } from "node:fs";
 import { dirname, join } from "node:path";
 import { atomicWriteFile, getConfigDir } from "../config";
@@ -17,6 +19,7 @@ import { atomicWriteFile, getConfigDir } from "../config";
 export const LOCAL_USAGE_STORE_VERSION = 1;
 export const LOCAL_USAGE_MAX_DAYS = 400;
 export const LOCAL_USAGE_MAX_RECEIPTS = 8_192;
+export const LOCAL_USAGE_MAX_BYTES = 8 * 1024 * 1024;
 export const LOCAL_USAGE_PENDING_RETENTION_MS = 7 * 24 * 60 * 60 * 1_000;
 export const LOCAL_USAGE_RELATIVE_PATH = join("usage", "local-usage.json");
 
@@ -206,6 +209,9 @@ function descriptorIsConsistent(descriptor: LocalUsageDescriptor): boolean {
 }
 
 function parseStoredUsage(value: unknown): StoredLocalUsage {
+  if (isRecord(value) && typeof value.version === "number" && value.version > LOCAL_USAGE_STORE_VERSION) {
+    throw new Error("Local usage was written by a newer version; update the launcher to read it");
+  }
   if (!isRecord(value)
     || value.version !== LOCAL_USAGE_STORE_VERSION
     || !isIsoInstant(value.recordedSince)
@@ -392,7 +398,11 @@ function validateRecordInput(input: LocalUsageRecordInput): void {
   if (typeof input.id !== "string" || input.id.length < 1 || input.id.length > 256) {
     throw new Error("Local usage receipt id is invalid");
   }
-  if (!Number.isFinite(input.acceptedAt) || !descriptorIsConsistent(input)) {
+  if (!Number.isFinite(input.acceptedAt)
+    || !isTier(input.tier)
+    || !isSource(input.source)
+    || (input.proVersion !== null && !isProVersion(input.proVersion))
+    || !descriptorIsConsistent(input)) {
     throw new Error("Local usage receipt descriptor is invalid");
   }
 }
@@ -437,6 +447,7 @@ function lifetimeRow(store: StoredLocalUsage, input: LocalUsageRecordInput): Loc
     };
     store.proLifetime.push(row);
   }
+  row.firstRecordedAt = dateIso(Math.min(input.acceptedAt, Date.parse(row.firstRecordedAt)));
   row.lastRecordedAt = dateIso(Math.max(input.acceptedAt, Date.parse(row.lastRecordedAt)));
   return row;
 }
@@ -484,18 +495,21 @@ function updateOutcome(
   store: StoredLocalUsage,
   input: LocalUsageOutcomeInput,
   timeZone: string,
-): void {
+): boolean {
   const { receipt } = ensureAccepted(store, input, timeZone);
-  if (!receipt || receipt.outcome !== undefined) return;
+  if (!receipt || receipt.outcome !== undefined) return false;
   receipt.outcome = input.outcome;
   receipt.outcomeAt = input.outcomeAt;
   const field = input.outcome;
-  increment(mutableCounts(dayAggregate(store, receipt.day), receipt.tier), field);
+  // A late outcome must not recreate a daily bucket removed by retention.
+  const day = store.days.find(candidate => candidate.day === receipt.day);
+  if (day) increment(mutableCounts(day, receipt.tier), field);
   const lifetime = lifetimeRow(store, receipt);
   if (lifetime) {
     increment(lifetime, field);
     lifetime.lastRecordedAt = dateIso(Math.max(input.outcomeAt, Date.parse(lifetime.lastRecordedAt)));
   }
+  return true;
 }
 
 function advanceReceiptHorizon(store: StoredLocalUsage, discarded: readonly LocalUsageReceipt[]): void {
@@ -549,29 +563,78 @@ function nearestExistingAncestor(path: string): string {
   return current;
 }
 
+function readUsageFile(filePath: string): string {
+  const fd = openSync(filePath, "r");
+  try {
+    const metadata = fstatSync(fd);
+    if (!metadata.isFile() || metadata.size > LOCAL_USAGE_MAX_BYTES) {
+      throw new Error("Local usage store is not a regular file within the 8 MiB limit");
+    }
+    const contents = readFileSync(fd, "utf8");
+    if (Buffer.byteLength(contents) > LOCAL_USAGE_MAX_BYTES) {
+      throw new Error("Local usage store exceeds the 8 MiB limit");
+    }
+    return contents;
+  } finally {
+    closeSync(fd);
+  }
+}
+
+function removeAbandonedLock(lockPath: string): void {
+  try {
+    if (Date.now() - statSync(lockPath).mtimeMs <= STALE_LOCK_MS) return;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
+    throw error;
+  }
+  // Recheck under the guard so two waiters cannot unlink a new owner's lock.
+  const recoveryPath = `${lockPath}.reap`;
+  let recoveryFd: number;
+  try {
+    recoveryFd = openSync(recoveryPath, "wx", 0o600);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "EEXIST") return;
+    throw error;
+  }
+  try {
+    if (Date.now() - statSync(lockPath).mtimeMs <= STALE_LOCK_MS) return;
+    let owner: unknown;
+    try { owner = JSON.parse(readFileSync(lockPath, "utf8")); } catch { return; }
+    if (!isRecord(owner) || !Number.isSafeInteger(owner.pid) || (owner.pid as number) <= 0) return;
+    try {
+      process.kill(owner.pid as number, 0);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ESRCH") rmSync(lockPath);
+    }
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+  } finally {
+    try { closeSync(recoveryFd); } finally { rmSync(recoveryPath, { force: true }); }
+  }
+}
+
 function acquireLock(lockPath: string): () => void {
   const deadline = Date.now() + LOCK_TIMEOUT_MS;
   for (;;) {
+    let fd: number;
     try {
-      const fd = openSync(lockPath, "wx", 0o600);
-      return () => {
-        try { closeSync(fd); } finally { rmSync(lockPath, { force: true }); }
-      };
+      fd = openSync(lockPath, "wx", 0o600);
     } catch (error) {
-      const code = (error as NodeJS.ErrnoException).code;
-      if (code !== "EEXIST") throw error;
-      try {
-        if (Date.now() - statSync(lockPath).mtimeMs > STALE_LOCK_MS) {
-          rmSync(lockPath, { force: true });
-          continue;
-        }
-      } catch (statError) {
-        if ((statError as NodeJS.ErrnoException).code !== "ENOENT") throw statError;
-        continue;
-      }
+      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+      removeAbandonedLock(lockPath);
       if (Date.now() >= deadline) throw new Error("Local usage store is busy");
       Atomics.wait(lockWaitCell, 0, 0, 10);
+      continue;
     }
+    try {
+      writeFileSync(fd, JSON.stringify({ pid: process.pid }));
+    } catch (error) {
+      try { closeSync(fd); } finally { rmSync(lockPath, { force: true }); }
+      throw error;
+    }
+    return () => {
+      try { closeSync(fd); } finally { rmSync(lockPath, { force: true }); }
+    };
   }
 }
 
@@ -585,9 +648,9 @@ export class LocalUsageStore {
   }
 
   recordAccepted(input: LocalUsageRecordInput): void {
-    this.mutate(input.acceptedAt, input.acceptedAt, store => {
-      ensureAccepted(store, input, this.timeZone);
-    });
+    this.mutate(input.acceptedAt, input.acceptedAt, store => (
+      ensureAccepted(store, input, this.timeZone).inserted
+    ));
   }
 
   recordOutcome(input: LocalUsageOutcomeInput): void {
@@ -595,25 +658,34 @@ export class LocalUsageStore {
       throw new Error("Local usage outcome is invalid");
     }
     if (!Number.isFinite(input.outcomeAt)) throw new Error("Local usage outcome timestamp is invalid");
-    this.mutate(input.acceptedAt, input.outcomeAt, store => {
-      updateOutcome(store, input, this.timeZone);
-    });
+    this.mutate(input.acceptedAt, input.outcomeAt, store => (
+      updateOutcome(store, input, this.timeZone)
+    ));
   }
 
   private mutate(
     initialTimestamp: number,
     mutationTimestamp: number,
-    update: (store: StoredLocalUsage) => void,
+    update: (store: StoredLocalUsage) => boolean,
   ): void {
     const directory = dirname(this.filePath);
     mkdirSync(directory, { recursive: true, mode: 0o700 });
     try { chmodSync(directory, 0o700); } catch { /* Windows ACLs are installer-owned. */ }
     const release = acquireLock(`${this.filePath}.lock`);
     try {
-      const store = existsSync(this.filePath)
-        ? parseStoredUsage(JSON.parse(readFileSync(this.filePath, "utf8")) as unknown)
-        : emptyStoredUsage(initialTimestamp, this.timeZone);
-      update(store);
+      let previous: string | null = null;
+      try {
+        previous = readUsageFile(this.filePath);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+        if (existsSync(`${this.filePath}.bak`)) {
+          throw new Error("Local usage store is missing; recover the backup before recording more activity");
+        }
+      }
+      const store = previous === null
+        ? emptyStoredUsage(initialTimestamp, this.timeZone)
+        : parseStoredUsage(JSON.parse(previous) as unknown);
+      if (!update(store)) return;
       if (!store.timezones.includes(this.timeZone)) {
         store.timezones.push(this.timeZone);
         if (store.timezones.length > 16) store.timezones.splice(0, store.timezones.length - 16);
@@ -621,7 +693,13 @@ export class LocalUsageStore {
       const latestTimestamp = Math.max(mutationTimestamp, Date.parse(store.updatedAt));
       store.updatedAt = dateIso(latestTimestamp);
       pruneStoredUsage(store, latestTimestamp);
-      atomicWriteFile(this.filePath, `${JSON.stringify(store)}\n`);
+      const contents = `${JSON.stringify(store)}\n`;
+      if (Buffer.byteLength(contents) > LOCAL_USAGE_MAX_BYTES) {
+        throw new Error("Local usage store exceeds the 8 MiB limit");
+      }
+      // Back up only a validated store, before replacing it. Never rotate corrupt data.
+      if (previous !== null) atomicWriteFile(`${this.filePath}.bak`, previous);
+      atomicWriteFile(this.filePath, contents);
     } finally {
       release();
     }
@@ -630,6 +708,7 @@ export class LocalUsageStore {
 
 export class LocalUsageAttempt {
   private readonly records = new Map<string, LocalUsageAttemptRecord>();
+  private readonly persistedOutcomes = new Set<string>();
   private readonly attemptId: string;
 
   constructor(
@@ -666,16 +745,18 @@ export class LocalUsageAttempt {
 
   private finish(messageKey: string, outcome: LocalUsageOutcome, outcomeAt: number): void {
     const record = this.records.get(messageKey);
-    if (!record || record.outcome !== undefined) return;
+    if (!record || this.persistedOutcomes.has(messageKey)) return;
+    // A storage failure cannot change the result of the generation.
+    const settledOutcome = record.outcome ?? outcome;
+    const settledAt = record.outcomeAt ?? outcomeAt;
+    record.outcome = settledOutcome;
+    record.outcomeAt = settledAt;
     const recorded = this.safe(() => this.store.recordOutcome({
       ...record,
-      outcome,
-      outcomeAt,
+      outcome: settledOutcome,
+      outcomeAt: settledAt,
     }));
-    if (recorded) {
-      record.outcome = outcome;
-      record.outcomeAt = outcomeAt;
-    }
+    if (recorded) this.persistedOutcomes.add(messageKey);
   }
 
   private safe(operation: () => void): boolean {
@@ -784,25 +865,23 @@ export function readLocalUsageStatistics(
   }
   const now = options.now ?? Date.now();
   const timeZone = resolvedTimeZone(options.timeZone);
-  if (!existsSync(filePath)) {
-    try {
-      accessSync(nearestExistingAncestor(dirname(filePath)), constants.R_OK | constants.W_OK);
-      return statusWithoutData("empty", days, now, timeZone);
-    } catch (error) {
-      return statusWithoutData(
-        "error",
-        days,
-        now,
-        timeZone,
-        `Local usage storage is unavailable: ${error instanceof Error ? error.message : String(error)}`,
-      );
-    }
-  }
-
   let store: StoredLocalUsage;
   try {
-    store = parseStoredUsage(JSON.parse(readFileSync(filePath, "utf8")) as unknown);
+    store = parseStoredUsage(JSON.parse(readUsageFile(filePath)) as unknown);
   } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+      if (existsSync(`${filePath}.bak`)) {
+        return statusWithoutData("unreadable", days, now, timeZone,
+          "Local usage store is missing; a backup is available for recovery");
+      }
+      try {
+        accessSync(nearestExistingAncestor(dirname(filePath)), constants.R_OK | constants.W_OK);
+        return statusWithoutData("empty", days, now, timeZone);
+      } catch (accessError) {
+        return statusWithoutData("error", days, now, timeZone,
+          `Local usage storage is unavailable: ${accessError instanceof Error ? accessError.message : String(accessError)}`);
+      }
+    }
     return statusWithoutData(
       "unreadable",
       days,

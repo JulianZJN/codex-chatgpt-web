@@ -3,6 +3,7 @@ const path = require("node:path");
 
 const STORE_VERSION = 1;
 const MAX_DAYS = 400;
+const MAX_BYTES = 8 * 1024 * 1024;
 const TIERS = Object.freeze([
   "instant",
   "medium",
@@ -79,6 +80,9 @@ function descriptorIsConsistent(descriptor) {
 }
 
 function parseStoredUsage(value) {
+  if (isRecord(value) && typeof value.version === "number" && value.version > STORE_VERSION) {
+    throw new Error("Local usage was written by a newer version; update the launcher to read it");
+  }
   if (!isRecord(value)
     || value.version !== STORE_VERSION
     || !isIsoInstant(value.recordedSince)
@@ -257,6 +261,23 @@ function statusWithoutData(status, days, now, timeZone, warning) {
   };
 }
 
+function readUsageFile(filePath) {
+  const fd = fs.openSync(filePath, "r");
+  try {
+    const metadata = fs.fstatSync(fd);
+    if (!metadata.isFile() || metadata.size > MAX_BYTES) {
+      throw new Error("Local usage store is not a regular file within the 8 MiB limit");
+    }
+    const contents = fs.readFileSync(fd, "utf8");
+    if (Buffer.byteLength(contents) > MAX_BYTES) {
+      throw new Error("Local usage store exceeds the 8 MiB limit");
+    }
+    return contents;
+  } finally {
+    fs.closeSync(fd);
+  }
+}
+
 function readLocalUsageStatistics(filePath, options) {
   const days = options?.days;
   if (!Number.isSafeInteger(days) || days < 1 || days > MAX_DAYS) {
@@ -264,28 +285,23 @@ function readLocalUsageStatistics(filePath, options) {
   }
   const now = options.now ?? Date.now();
   const timeZone = resolvedTimeZone(options.timeZone);
-  if (!fs.existsSync(filePath)) {
-    try {
-      fs.accessSync(
-        nearestExistingAncestor(path.dirname(filePath)),
-        fs.constants.R_OK | fs.constants.W_OK,
-      );
-      return statusWithoutData("empty", days, now, timeZone);
-    } catch (error) {
-      return statusWithoutData(
-        "error",
-        days,
-        now,
-        timeZone,
-        `Local usage storage is unavailable: ${error instanceof Error ? error.message : String(error)}`,
-      );
-    }
-  }
-
   let store;
   try {
-    store = parseStoredUsage(JSON.parse(fs.readFileSync(filePath, "utf8")));
+    store = parseStoredUsage(JSON.parse(readUsageFile(filePath)));
   } catch (error) {
+    if (error?.code === "ENOENT") {
+      if (fs.existsSync(`${filePath}.bak`)) {
+        return statusWithoutData("unreadable", days, now, timeZone,
+          "Local usage store is missing; a backup is available for recovery");
+      }
+      try {
+        fs.accessSync(nearestExistingAncestor(path.dirname(filePath)), fs.constants.R_OK | fs.constants.W_OK);
+        return statusWithoutData("empty", days, now, timeZone);
+      } catch (accessError) {
+        return statusWithoutData("error", days, now, timeZone,
+          `Local usage storage is unavailable: ${accessError instanceof Error ? accessError.message : String(accessError)}`);
+      }
+    }
     return statusWithoutData(
       "unreadable",
       days,

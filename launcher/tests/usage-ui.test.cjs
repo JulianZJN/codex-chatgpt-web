@@ -136,3 +136,28 @@ test('statistics navigation label is localized independently from settings and a
     assert.notEqual(copy.statistics, copy.activity);
   }
 });
+test('no-outcome counts distinguish accepted unfinished messages from failed messages', () => {
+  const html = render(fixture());
+  const weekCard = html.match(/data-pro-card="6"[\s\S]*?(?=<div class="usage-chart-heading")/)[0];
+  assert.match(weekCard, /<p>No outcome 1<\/p>/);
+  assert.match(html, /<th scope="row">Pro · version unknown<\/th><td>Self-reported<\/td><td>11<\/td><td>0<\/td><td>0<\/td><td>11<\/td>/);
+  assert.match(html, /<th scope="row">GPT-5.5 Pro<\/th><td>—<\/td><td>0<\/td><td>0<\/td><td>0<\/td><td>0<\/td>/);
+});
+test('7- and 30-day charts expose one keyboard entry point while retaining every day', () => {
+  for (const days of [7, 30]) {
+    const data = load('../tests/usage-ui.fixture-data.ts').fixture(days, 'ready');
+    const html = renderToStaticMarkup(React.createElement(UsageStatisticsView, { data, language: 'en', loading: false, days, onDaysChange() {}, onRefresh() {} }));
+    const bars = [...html.matchAll(/<g tabindex="(-?\d+)" role="button" aria-label="([^"]+)" class="usage-day"/g)];
+    assert.equal(bars.length, days);
+    assert.equal(bars.filter((bar) => bar[1] === '0').length, 1);
+    assert.match(bars.find((bar) => bar[1] === '0')[2], /^Sep 13, 2026:/);
+  }
+});
+test('legend hides unused tiers without removing nonzero unknown Pro usage', () => {
+  const html = render(fixture());
+  const legend = html.match(/<ul class="usage-legend"[\s\S]*?<\/ul>/)[0];
+  assert.match(legend, /GPT-5.6 Pro/);
+  assert.match(legend, /GPT-6 Pro/);
+  assert.match(legend, /Pro · version unknown/);
+  assert.doesNotMatch(legend, /Instant|Medium|Luna|Zero Risk/);
+});
