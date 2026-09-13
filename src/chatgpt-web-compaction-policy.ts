@@ -2,11 +2,17 @@ import { CHATGPT_WEB_BACKEND_MODEL } from "./chatgpt-web-models";
 import type { ChatGptWebCapabilities } from "./adapters/chatgpt-web/model";
 import type { CodexParsedRequest } from "./types";
 
-export type ChatGptWebCompactionModel = "extra-high" | "5.6-pro" | "5.5-pro";
-
 export type ChatGptWebCompactionExecution =
   | { effort: "xhigh"; modelVersion: "5.6" }
   | { effort: "max"; modelVersion: "5.5" | "5.6" };
+
+const COMPACTION_EXECUTIONS = {
+  "extra-high": { effort: "xhigh", modelVersion: "5.6" },
+  "5.6-pro": { effort: "max", modelVersion: "5.6" },
+  "5.5-pro": { effort: "max", modelVersion: "5.5" },
+} as const satisfies Record<string, ChatGptWebCompactionExecution>;
+
+export type ChatGptWebCompactionModel = keyof typeof COMPACTION_EXECUTIONS;
 
 export interface ChatGptWebCompactionPlan {
   /**
@@ -21,7 +27,9 @@ export function parseChatGptWebCompactionModel(
   value: unknown,
 ): ChatGptWebCompactionModel | undefined {
   if (value === undefined) return undefined;
-  if (value === "extra-high" || value === "5.6-pro" || value === "5.5-pro") return value;
+  if (typeof value === "string" && Object.hasOwn(COMPACTION_EXECUTIONS, value)) {
+    return value as ChatGptWebCompactionModel;
+  }
   throw new Error(
     "Invalid compactionModel; expected extra-high, 5.6-pro, 5.5-pro, or an omitted value",
   );
@@ -51,14 +59,7 @@ export function parseChatGptWebCompactionExecution(
 }
 
 function executionFor(model: ChatGptWebCompactionModel): ChatGptWebCompactionExecution {
-  switch (model) {
-    case "extra-high":
-      return { effort: "xhigh", modelVersion: "5.6" };
-    case "5.6-pro":
-      return { effort: "max", modelVersion: "5.6" };
-    case "5.5-pro":
-      return { effort: "max", modelVersion: "5.5" };
-  }
+  return { ...COMPACTION_EXECUTIONS[model] };
 }
 
 export function resolveChatGptWebCompactionPlan(
