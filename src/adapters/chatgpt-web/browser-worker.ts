@@ -14,6 +14,10 @@ import {
   LEGACY_CHATGPT_CONNECTOR_NAMES,
 } from "../../config";
 import { estimateTokens } from "../../lib/token-estimate";
+import {
+  LocalUsageAttempt, LocalUsageStore, parseObservedChatGptProVersion,
+  usageDescriptorForAutomaticMode, type LocalUsageProVersion,
+} from "../../usage/local-usage";
 import type { CodexProviderConfig } from "../../types";
 import { parseDataUrl } from "../image";
 import {
@@ -96,6 +100,25 @@ import type {
 } from "./turn-progress";
 
 export { MAX_CHATGPT_BROWSER_TABS } from "./concurrency";
+
+type ObservedModelMode = ChatGptWebModelMode & {
+  observedProVersion?: Exclude<LocalUsageProVersion, "unknown">;
+};
+
+/** Read the already-open selector; statistics never open a menu or select a model. */
+export async function observeChatGptUsageProVersion(
+  slider: Locator,
+): Promise<ObservedModelMode["observedProVersion"]> {
+  try {
+    const descriptions = await slider.evaluate(element => (element.getAttribute("aria-describedby") ?? "")
+      .split(/\s+/).filter(Boolean)
+      .map(id => document.getElementById(id)?.textContent ?? ""), undefined, { timeout: 500 });
+    return parseObservedChatGptProVersion(descriptions);
+  } catch {
+    // Missing or changed metadata is unknown, not an excuse to fail or change a paid turn.
+    return undefined;
+  }
+}
 
 const workers = new Map<string, ChatGptBrowserWorker>();
 
@@ -2321,7 +2344,7 @@ export class ChatGptBrowserWorker {
     reasoning: string | undefined,
     capabilities: ChatGptWebCapabilities,
     captureDiagnostic?: (checkpoint: string) => Promise<void>,
-  ): Promise<ChatGptWebModelMode> {
+  ): Promise<ObservedModelMode> {
     const mode = resolveChatGptWebModelMode(modelId, reasoning, capabilities);
     const composer = await this.activeComposer(page);
     const composerForm = composer.locator("xpath=ancestor::form[1]");
@@ -2441,8 +2464,10 @@ export class ChatGptBrowserWorker {
       }
     }
     await captureDiagnostic?.("effort-selected");
+    const observedProVersion = mode.displayLabel === "Pro"
+      ? await observeChatGptUsageProVersion(effortSlider) : undefined;
     await page.keyboard.press("Escape");
-    return mode;
+    return { ...mode, ...(observedProVersion ? { observedProVersion } : {}) };
   }
 
   private async activeComposer(
@@ -3349,6 +3374,7 @@ export class ChatGptBrowserWorker {
     submissionLifecycle?: Pick<BrowserTurn, "onSendActivated" | "onSubmitted">,
     completionTracker?: ChatGptCompletionTracker,
     recoverObservation?: ChatGptObservationRecovery,
+    onAccepted?: () => void,
   ): Promise<ChatGptSubmissionEvidence> {
     const composer = await this.activeComposer(page);
     const sendButton = composer
@@ -3389,6 +3415,7 @@ export class ChatGptBrowserWorker {
       completionTracker,
       recoverObservation,
     );
+    onAccepted?.();
     submissionLifecycle?.onSubmitted?.();
     return evidence;
   }
@@ -4297,6 +4324,7 @@ export class ChatGptBrowserWorker {
     let turnConnection: Browser | undefined;
     let managedPage: Page | undefined;
     let diagnosticPage: Page | undefined;
+    const localUsage = new LocalUsageAttempt(new LocalUsageStore());
     try {
       if (turn.abortSignal?.aborted) throw new DOMException("ChatGPT web turn aborted", "AbortError");
       const multipartTransactionId = prepared.multipart
@@ -4566,6 +4594,7 @@ export class ChatGptBrowserWorker {
                   return recovered;
                 }
                 : undefined,
+              () => localUsage.accept(`multipart-${index + 1}`, usageDescriptorForAutomaticMode(mode)),
             ),
           );
           console.info(
@@ -4609,6 +4638,7 @@ export class ChatGptBrowserWorker {
             },
             chatGptSuspensionClock,
           );
+          localUsage.complete(`multipart-${index + 1}`);
           await diagnostics.capture(page, `multipart-stage-${index + 1}-acknowledged`);
           await turn.onMultipartStageAcknowledged?.(index + 1);
         }
@@ -4715,6 +4745,7 @@ export class ChatGptBrowserWorker {
               return recovered;
             }
             : undefined,
+          () => localUsage.accept("final", usageDescriptorForAutomaticMode(mode)),
         ),
       );
       console.info(`[chatgpt-web] browser turn ${turn.traceId} submission accepted evidence=${finalSubmissionEvidence}`);
@@ -5014,6 +5045,7 @@ export class ChatGptBrowserWorker {
        }
       }
 
+      localUsage.complete("final");
       if (this.context && this.config.browserHost === "managed-chrome") {
         const state = await this.context.storageState();
         atomicWriteFile(this.config.storageStatePath, `${JSON.stringify(state)}\n`);
@@ -5027,12 +5059,14 @@ export class ChatGptBrowserWorker {
     } catch (error) {
       if (error instanceof DOMException && error.name === "AbortError"
         && turn.abortSignal?.reason instanceof ChatGptCompactionHandoffAccepted) {
+        localUsage.complete("final");
         console.info(`[chatgpt-web] browser turn ${turn.traceId} ended after accepted structured compaction handoff`);
         if (diagnosticPage && !diagnosticPage.isClosed()) {
           await diagnostics.capture(diagnosticPage, "compaction-handoff-accepted");
         }
         throw turn.abortSignal.reason;
       }
+      localUsage.failPending();
       console.error(
         `[chatgpt-web] browser turn ${turn.traceId} failed:`
         + ` ${redactChatGptUiDiagnostic(error instanceof Error ? error.message : String(error))}`,

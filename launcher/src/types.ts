@@ -120,6 +120,7 @@ export interface LauncherSnapshot {
 }
 
 export interface LauncherApi {
+  getUsageStatistics(input: { days: 7 | 30 }): Promise<UsageStatistics>;
   snapshot(): Promise<LauncherSnapshot>;
   setLanguage(language: Language): Promise<LauncherState>;
   openSocial(target: "github" | "x"): Promise<LauncherState>;
@@ -177,6 +178,21 @@ export interface LauncherApi {
   onOperation(listener: (state: OperationState) => void): () => void;
   onLog(listener: (record: LogRecord) => void): () => void;
   onUpdateState(listener: (state: UpdateState) => void): () => void;
+}
+
+export type UsageTier = "instant" | "medium" | "high" | "extraHigh" | "pro5_5" | "pro5_6" | "pro6" | "proUnknown" | "luna" | "think" | "manualUnknown";
+export interface UsageCounts { accepted: number; completed: number; error: number }
+export interface UsageDay { day: string; tiers: Record<UsageTier, UsageCounts> }
+export interface UsageStatistics {
+  status: "ready" | "empty" | "unreadable" | "error";
+  timezone: string;
+  recordedSince: string | null;
+  range: { days: 7 | 30; startDay: string; endDay: string; dayBoundary: "local-calendar"; weekStartsOn: "monday" };
+  days: UsageDay[];
+  today5_6Pro: UsageCounts & { day: string };
+  week6Pro: UsageCounts & { startDay: string; endDay: string; weekStartsOn: "monday" };
+  proLifetime: Array<UsageCounts & { version: "5.5" | "5.6" | "6" | "unknown"; source: "observed" | "self-reported" | "unknown"; firstRecordedAt: string; lastRecordedAt: string }>;
+  warnings: string[];
 }
 
 declare global {

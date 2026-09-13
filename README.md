@@ -59,6 +59,7 @@ connects ChatGPT back to the tools of that same Codex task until its next compac
   starts a clean chat; if that chat was closed, canonical Codex history supplies the fallback.
 - **One cross-platform launcher.** The macOS, Windows, and Linux app owns sign-in, model setup, MCP
   guidance, health checks, safe diagnostics, and up to five visible task-bound browser tabs.
+- **Local usage statistics.** Settings show 7/30-day activity by tier, separate GPT-5.6 Pro daily and GPT-6 Pro weekly counts, and Pro lifetime totals. These are local accepted-message counts, not official remaining allowances. See [counting and privacy](docs/local-usage-statistics.md).
 - **Fail-closed behavior.** Missing models, tools, or changed ChatGPT UI produce explicit errors
   instead of silently switching route or capability. End-to-end coverage is documented in
   [release validation](docs/release-validation.md).

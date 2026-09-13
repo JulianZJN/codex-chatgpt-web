@@ -1,6 +1,7 @@
 import { createHash, randomBytes } from "node:crypto";
 import { resolve } from "node:path";
-import { isChatGptWebZeroRiskBackendModel } from "../../chatgpt-web-models";
+import { CHATGPT_WEB_ZERO_RISK_PRO_BACKEND_MODEL, isChatGptWebZeroRiskBackendModel } from "../../chatgpt-web-models";
+import { LocalUsageAttempt, LocalUsageStore, usageDescriptorForManualMode } from "../../usage/local-usage";
 import { defaultBrokerEndpoint, expandUserPath, resolveBrokerEndpoint } from "../../config";
 import {
   cancelLauncherManualTurn,
@@ -524,6 +525,7 @@ export function createChatGptWebAdapter(
         launcherEnded = true;
       };
       const runManual = async (): Promise<string> => {
+        const localUsage = new LocalUsageAttempt(new LocalUsageStore());
         try {
           activeToken = await broker.registerSafe(environment, surfaceNonce, undefined, traceId);
           observeCapabilityRetirement(activeToken, externalProgress);
@@ -571,6 +573,7 @@ export function createChatGptWebAdapter(
           await zeroRiskManualControl.waitSent(retainedLauncherDescriptor, owner, {
             abortSignal: browserAbort.signal,
           });
+          localUsage.accept("final", usageDescriptorForManualMode(parsed.modelId === CHATGPT_WEB_ZERO_RISK_PRO_BACKEND_MODEL));
           await broker.confirmSafeTurnSent(activeToken, surfaceNonce);
           submission.phase = "accepted";
           if (!parsed._compactionRequest) trace.push({
@@ -607,6 +610,7 @@ export function createChatGptWebAdapter(
             terminalAbort.abort();
             browserAbort.signal.removeEventListener("abort", abortTerminal);
           }
+          localUsage.complete("final");
           text.push(answer);
           try {
             await finishLauncher("completed");
@@ -620,6 +624,7 @@ export function createChatGptWebAdapter(
           }
           return answer;
         } catch (error) {
+          localUsage.failPending();
           const normalized = safeManualAdapterError(error);
           // Capture the causal state before our own cleanup revokes the broker capability. The
           // retirement observer also aborts browserAbort, but that self-induced abort must not turn

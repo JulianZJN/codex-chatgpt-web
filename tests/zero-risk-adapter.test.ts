@@ -1,4 +1,5 @@
-import { afterAll, expect, test } from "bun:test";
+import { afterAll, expect, spyOn, test } from "bun:test";
+import { LocalUsageStore } from "../src/usage/local-usage";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { createRequire } from "node:module";
@@ -234,6 +235,8 @@ for (const scenario of [
 });
 
 test("Zero Risk adapter never starts the automatic browser worker and completes only through Zero Risk MCP", async () => {
+  const accepted = spyOn(LocalUsageStore.prototype, "recordAccepted").mockImplementation(() => {});
+  const outcome = spyOn(LocalUsageStore.prototype, "recordOutcome").mockImplementation(() => {});
   const config = provider("complete");
   const broker = TurnBroker.forSocket(config.chatgptWeb!.brokerSocketPath!);
   const worker = ChatGptBrowserWorker.forProvider(config);
@@ -251,6 +254,7 @@ test("Zero Risk adapter never starts the automatic browser worker and completes 
       exactBinding = binding(activity.prompt);
     },
     async waitSent() {
+      expect(accepted).toHaveBeenCalledTimes(0);
       calls.push("sent");
       broker.startSafeTurn(exactBinding!.request_id);
     },
@@ -270,6 +274,10 @@ test("Zero Risk adapter never starts the automatic browser worker and completes 
       event => events.push(event),
     );
     expect(calls).toEqual(["start", "sent", "started", "end:completed:true"]);
+    expect(accepted).toHaveBeenCalledTimes(1);
+    expect(accepted.mock.calls[0]![0]).toMatchObject({ tier: "manualUnknown", proVersion: null });
+    expect(outcome).toHaveBeenCalledTimes(1);
+    expect(outcome.mock.calls[0]![0]).toMatchObject({ outcome: "completed" });
     expect(manualCompaction).toBeUndefined();
     expect(events.some(event => event.type === "text_delta"
       && event.phase === "commentary"
@@ -283,6 +291,8 @@ test("Zero Risk adapter never starts the automatic browser worker and completes 
     expect(events.at(-1)).toMatchObject({ type: "done", stopReason: "stop", endTurn: true });
   } finally {
     (worker as unknown as { run: (turn: BrowserTurn) => Promise<string> }).run = originalRun;
+    accepted.mockRestore();
+    outcome.mockRestore();
     chatGptTurnSessions.clear();
     await broker.close();
   }
@@ -419,6 +429,8 @@ test("a stopped Responses observer revokes its Zero Risk binding and releases th
 });
 
 test("a Zero Risk launcher failure remains failed when its own capability cleanup retires the broker", async () => {
+  const accepted = spyOn(LocalUsageStore.prototype, "recordAccepted").mockImplementation(() => {});
+  const outcome = spyOn(LocalUsageStore.prototype, "recordOutcome").mockImplementation(() => {});
   const config = provider("failed-cleanup");
   const broker = TurnBroker.forSocket(config.chatgptWeb!.brokerSocketPath!);
   let exactBinding: ReturnType<typeof binding> | undefined;
@@ -438,9 +450,13 @@ test("a Zero Risk launcher failure remains failed when its own capability cleanu
       () => {},
     )).rejects.toThrow("synthetic launcher observation failure");
     expect(ended).toEqual(["failed"]);
+    expect(accepted).toHaveBeenCalledTimes(0);
+    expect(outcome).toHaveBeenCalledTimes(0);
     expect(() => broker.startSafeTurn(exactBinding!.request_id))
       .toThrow("invalid, expired, or revoked");
   } finally {
+    accepted.mockRestore();
+    outcome.mockRestore();
     chatGptTurnSessions.clear();
     await broker.close();
   }
@@ -556,6 +572,8 @@ test("Zero Risk compaction uses a fresh manual checkpoint without leaking guide 
 });
 
 test("closing the Zero Risk Launcher tab revokes the bound turn instead of waiting forever", async () => {
+  const accepted = spyOn(LocalUsageStore.prototype, "recordAccepted").mockImplementation(() => {});
+  const outcome = spyOn(LocalUsageStore.prototype, "recordOutcome").mockImplementation(() => {});
   const config = provider("cancelled-tab");
   const broker = TurnBroker.forSocket(config.chatgptWeb!.brokerSocketPath!);
   let exactBinding: ReturnType<typeof binding> | undefined;
@@ -586,9 +604,14 @@ test("closing the Zero Risk Launcher tab revokes the bound turn instead of waiti
       code: "manual_turn_cancelled",
       retryable: false,
     });
+    expect(accepted).toHaveBeenCalledTimes(1);
+    expect(outcome).toHaveBeenCalledTimes(1);
+    expect(outcome.mock.calls[0]![0]).toMatchObject({ outcome: "error" });
     expect(() => broker.startSafeTurn(exactBinding!.request_id))
       .toThrow("invalid, expired, or revoked");
   } finally {
+    accepted.mockRestore();
+    outcome.mockRestore();
     chatGptTurnSessions.clear();
     await broker.close();
   }

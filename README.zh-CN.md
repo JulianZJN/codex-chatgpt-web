@@ -48,6 +48,8 @@ Codex 会保留原生任务、上下文生命周期、界面和工具 harness。
 
 ## 亮点
 
+- **本地调用统计。** 设置中提供按档位区分的 7/30 天活动图、GPT-5.6 Pro 当日次数、GPT-6 Pro 本周次数和 Pro 累计表。这是本机已确认发送的消息数，不是官方剩余额度。详见[计数与隐私说明](docs/local-usage-statistics.md)。
+
 - **Codex 原生模型。** ChatGPT Web 直接出现在 Codex 模型选择器中，同时保留原有任务界面、
   上下文生命周期、流式输出、追踪和工具展示。
 - **通过 MCP 使用完整 Codex harness。** 完整模式支持登录账户公开的全部 effort（包括 Pro），
