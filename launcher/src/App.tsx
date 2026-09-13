@@ -614,6 +614,7 @@ function LauncherShell({
                 />
               </SidebarGroup>
               <SidebarGroup label={copy.runtime}>
+                <SidebarItem active={surface === "statistics"} icon="statistics" label={copy.statistics} onClick={() => navigateSurface("statistics")} />
                 <SidebarItem active={surface === "activity"} icon="activity" label={copy.activity} onClick={() => navigateSurface("activity")} />
               </SidebarGroup>
             </nav>
@@ -695,6 +696,11 @@ function LauncherShell({
             ) : null}
             {surface === "activity" ? (
               <ActivitySurface copy={copy} language={language} logs={logs} setError={setError} />
+            ) : null}
+            {surface === "statistics" ? (
+              <ContentSurface narrow title={copy.statistics}>
+                <UsageStatisticsSection api={api!} language={language} />
+              </ContentSurface>
             ) : null}
             {surface === "settings" ? (
               <SettingsSurface
@@ -1669,7 +1675,6 @@ function SettingsSurface({
 
   return (
     <ContentSurface narrow title={devProfile ? copy.devSettingsTitle : copy.settingsTitle}>
-      <UsageStatisticsSection api={api!} language={language} />
       <SectionHeading label={copy.general} />
       <div className="settings-list">
         {!devProfile ? <SettingRow body={copy.launchAtLoginBody} flushAfter label={copy.launchAtLogin}>

@@ -7,7 +7,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { ChatGptBrowserWorker, type BrowserTurn } from "../src/adapters/chatgpt-web/browser-worker";
 import {
-  createChatGptWebAdapter,
+  createChatGptWebAdapter as createBaseAdapter,
   type ChatGptZeroRiskManualControl,
 } from "../src/adapters/chatgpt-web/index";
 import { chatGptTurnSessions } from "../src/adapters/chatgpt-web/turn-execution";
@@ -20,6 +20,17 @@ import type { AdapterEvent, CodexParsedRequest, CodexProviderConfig } from "../s
 
 const testTempRoot = process.platform === "win32" ? tmpdir() : "/tmp";
 const root = mkdtempSync(join(testTempRoot, "cgw-zero-risk-adapter-"));
+// Other suites reset process.env after running. Inject storage instead of relying on a
+// process-global home override, so these simulated sends can never pollute real usage.
+function createChatGptWebAdapter(
+  config: CodexProviderConfig,
+  dependencies: Parameters<typeof createBaseAdapter>[1] = {},
+) {
+  return createBaseAdapter(config, {
+    ...dependencies,
+    localUsageStore: new LocalUsageStore({ filePath: join(root, "local-usage.json") }),
+  });
+}
 afterAll(() => {
   chatGptTurnSessions.clear();
   rmSync(root, { recursive: true, force: true });

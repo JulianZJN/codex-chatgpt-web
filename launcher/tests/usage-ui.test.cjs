@@ -118,3 +118,21 @@ test('30-day date ticks leave room for the final endpoint instead of labelling a
     .map((match) => match[1]).filter((label) => /[A-Za-z]/.test(label));
   assert.deepEqual(dateLabels, ['Aug 15', 'Aug 22', 'Aug 29', 'Sep 5', 'Sep 13']);
 });
+test('historical timezone warnings explain calendar boundaries without alleging skipped records', () => {
+  const data = fixture();
+  data.warnings = ['Historical local days include another timezone (UTC); the displayed range uses Asia/Taipei.'];
+  for (const [language, expected] of [['en', /historical days were recorded in another timezone/], ['zh-CN', /部分历史日期按其他时区记录/], ['ja', /別のタイムゾーンで記録/]]) {
+    const html = render(data, language);
+    assert.match(html, expected);
+    assert.doesNotMatch(html, /records were skipped|记录已跳过|記録をスキップ/);
+  }
+});
+test('statistics navigation label is localized independently from settings and activity', () => {
+  const { copyFor } = load('i18n.ts');
+  for (const [language, expected] of [['en', 'Statistics'], ['zh-CN', '统计'], ['ja', '統計']]) {
+    const copy = copyFor(language);
+    assert.equal(copy.statistics, expected);
+    assert.notEqual(copy.statistics, copy.settings);
+    assert.notEqual(copy.statistics, copy.activity);
+  }
+});

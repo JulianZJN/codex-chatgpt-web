@@ -1,6 +1,6 @@
 # Local usage statistics
 
-The launcher settings show messages sent through this local Web GPT installation, not an official account allowance or remaining-quota counter. Activity in another browser, on a phone, or on another computer is not included.
+The launcher's Statistics page shows messages sent through this local Web GPT installation, not an official account allowance or remaining-quota counter. Activity in another browser, on a phone, or on another computer is not included.
 
 ## What counts
 
@@ -11,7 +11,7 @@ The launcher settings show messages sent through this local Web GPT installation
 - Pro versions use the observed model identity. An unknown version is displayed as unknown, never silently attributed to GPT-6 or GPT-5.6.
 - Zero Risk mode does not start inspecting ChatGPT for statistics. Its user-confirmed activity is marked separately; an unspecified model is not assigned an exact Pro version.
 
-## Settings view
+## Statistics page
 
 The 7-day and 30-day stacked charts show daily activity by tier. Pro versions have separate series. The summary highlights GPT-5.6 Pro for today and GPT-6 Pro for this week, and a dedicated Pro table shows cumulative activity by version.
 

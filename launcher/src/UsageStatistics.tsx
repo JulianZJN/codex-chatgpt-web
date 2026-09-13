@@ -70,7 +70,7 @@ export function UsageStatisticsView({ data, days, language, loading, onDaysChang
       <div className="usage-state is-error" role="alert"><strong>{data?.status === "unreadable" ? copy.unreadable : copy.failed}</strong><p>{copy.errorBody}</p></div> : data.status === "empty" ?
         <div className="usage-state" role="status"><strong>{copy.empty}</strong><p>{copy.emptyBody}</p></div> : null}
     {ready && <>
-      {data.warnings.length > 0 && <p className="usage-warning" role="status">{copy.partial}</p>}
+      {data.warnings.length > 0 && <p className="usage-warning" role="status">{copy.timezoneChanged}</p>}
       <div className="usage-chart-heading"><h3>{copy.daily}</h3><div><strong data-usage-total={total}>{number(total)}</strong><span>{copy.total}</span></div></div>
       <div className="usage-chart">
         <svg viewBox="0 0 600 218" role="group" aria-label={`${copy.daily}: ${number(total)} ${copy.total}`}>

@@ -342,6 +342,7 @@ export function createChatGptWebAdapter(
   dependencies: {
     broker?: TurnBrokerOwner;
     zeroRiskManualControl?: ChatGptZeroRiskManualControl;
+    localUsageStore?: Pick<LocalUsageStore, "recordAccepted" | "recordOutcome">;
   } = {},
 ): ProviderAdapter {
   const worker = ChatGptBrowserWorker.forProvider(provider);
@@ -525,7 +526,7 @@ export function createChatGptWebAdapter(
         launcherEnded = true;
       };
       const runManual = async (): Promise<string> => {
-        const localUsage = new LocalUsageAttempt(new LocalUsageStore());
+        const localUsage = new LocalUsageAttempt(dependencies.localUsageStore ?? new LocalUsageStore());
         try {
           activeToken = await broker.registerSafe(environment, surfaceNonce, undefined, traceId);
           observeCapabilityRetirement(activeToken, externalProgress);
