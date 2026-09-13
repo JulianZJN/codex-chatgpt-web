@@ -110,7 +110,8 @@ export async function observeChatGptUsageProVersion(
   slider: Locator,
 ): Promise<ObservedModelMode["observedProVersion"]> {
   try {
-    const descriptions = await slider.evaluate(element => (element.getAttribute("aria-describedby") ?? "")
+    const descriptions = await slider.evaluate(element => ((element.closest('[role="menuitem"]') ?? element)
+      .getAttribute("aria-describedby") ?? "")
       .split(/\s+/).filter(Boolean)
       .map(id => document.getElementById(id)?.textContent ?? ""), undefined, { timeout: 500 });
     return parseObservedChatGptProVersion(descriptions);
