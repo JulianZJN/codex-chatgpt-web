@@ -62,3 +62,30 @@ Unknown settings and inconsistent execution payloads are rejected.
 The production service reads the preference for each new eligible compaction. The
 isolated DEV named-chat CLI snapshots configuration at startup, so reopen that CLI
 after changing the DEV preference. The launcher itself does not need to restart.
+
+## Picker-state regression checks
+
+The family list belongs to the composer-owned menu. Its collapsed advanced view can
+remain attached and geometrically visible while `inert`, so visibility alone does
+not prove that a model row is clickable. The selector expands a collapsed model
+trigger before a normal actionability-checked click. It reuses a family only when
+its unique exact model row is explicitly checked; a rendered 5.6 label under
+Latest is not proof that 5.6 is pinned.
+
+After changing the control, checked state and spoken family/effort each receive a
+bounded, read-only settling window of up to one second. This does not retry an
+accepted prompt or extend compaction's handoff budget. Immediate pre-send
+verification stays strict; unavailable or contradictory state still blocks sending.
+
+`tests/pro-model-picker-dom.test.ts` runs the actual selector against an offline
+HTML fixture in a fresh headless Chromium context, including inert rows and an
+unrelated duplicate model outside the owned menu. Network requests are blocked;
+it neither opens a logged-in profile nor submits a ChatGPT prompt. The tests are
+skipped unless an existing Chromium executable is explicitly supplied:
+
+```bash
+CHATGPT_PICKER_TEST_CHROME=/absolute/path/to/chrome bun test tests/pro-model-picker-dom.test.ts
+```
+
+These offline checks are not a substitute for an authenticated, installed
+integration test on each model.

@@ -20,8 +20,16 @@ function picker(options: {
   initialVersion?: string;
   versionTriggerUnavailable?: boolean;
   numericValueMissing?: boolean;
+  checkedFamily?: string;
+  latestRoutesToSixAtPro?: boolean;
+  familyRowsVisible?: boolean;
+  familyRowsInertWhenCollapsed?: boolean;
+  descriptionLagReads?: number;
+  checkedStateLagReads?: number;
 } = {}) {
   let version = options.initialVersion ?? "6", value = 0, submenu = false;
+  let checkedFamily = options.checkedFamily ?? options.initialVersion ?? "6";
+  let descriptionLagReads = 0, checkedStateLagReads = 0;
   let keyboardFailure: string | undefined;
   const actions: string[] = [];
   const submittedStates: Array<{ version: string; value: number }> = [];
@@ -37,6 +45,8 @@ function picker(options: {
     press: async (key: string) => {
     actions.push(`${version}:${key}`);
     value += key === "ArrowRight" ? 1 : -1;
+    descriptionLagReads = options.descriptionLagReads ?? 0;
+    if (options.latestRoutesToSixAtPro && checkedFamily === "6") version = value === 4 ? "6" : "5.6";
   } };
   const slider = {
     waitFor: async () => {},
@@ -57,6 +67,8 @@ function picker(options: {
   };
   const versionTrigger = {
     count: async () => 1, waitFor: async () => {},
+    getAttribute: async (name: string) => name === "aria-expanded"
+      ? String(submenu || (options.familyRowsVisible === true && !options.familyRowsInertWhenCollapsed)) : null,
     click: async () => {
       if (options.versionTriggerUnavailable) throw new Error("family picker is unavailable in this menu state");
       submenu = true; actions.push("open-versions");
@@ -64,13 +76,22 @@ function picker(options: {
   };
   const modelOptions = options.modelOptions ?? observedPicker.options;
   const radio = (name: string | RegExp) => {
-    const option = modelOptions.find(option => typeof name === "string" ? option.name === name : name.test(option.name));
+    const matches = modelOptions.filter(option => typeof name === "string" ? option.name === name : name.test(option.name));
+    const option = matches[0];
     return {
-    count: async () => options.unavailable ? 0 : 1,
+    isVisible: async () => !options.unavailable && !!option && (options.familyRowsVisible === true || submenu),
+    count: async () => options.unavailable ? 0 : matches.length,
     waitFor: async () => { if (options.unavailable || !option) throw new Error("missing version"); },
-    getAttribute: async (attribute: string) => attribute === "aria-checked" ? "false" : null,
+    getAttribute: async (attribute: string) => {
+      if (attribute !== "aria-checked") return null;
+      if (checkedStateLagReads-- > 0) return "false";
+      return String(checkedFamily === option?.version);
+    },
     click: async () => {
-      if (options.unavailable || !submenu || !option) throw new Error("unavailable version");
+      if (options.familyRowsInertWhenCollapsed && !submenu) throw new Error("model row is inert despite visible geometry");
+      if (options.unavailable || (!submenu && options.familyRowsVisible !== true) || !option) throw new Error("unavailable version");
+      checkedFamily = option.version;
+      checkedStateLagReads = options.checkedStateLagReads ?? 0;
       version = option.version;
       value = 0; submenu = false; actions.push(`selected:${version}`);
     },
@@ -82,8 +103,9 @@ function picker(options: {
       if (!name.test(observedPicker.triggerLabel)) throw new Error("model trigger does not match observed label");
       return versionTrigger;
     },
-    getByRole: (role: string, args: { name: string | RegExp; exact: boolean }) => {
+    getByRole: (role: string, args: { name: string | RegExp; exact: boolean; includeHidden?: boolean }) => {
       if (role !== "menuitemradio" || !args.exact) throw new Error("expected exact model radio");
+      if (!submenu && options.familyRowsVisible !== true && args.includeHidden !== true) return hidden;
       return radio(args.name);
     },
   };
@@ -91,8 +113,9 @@ function picker(options: {
   const page = {
     evaluate: async (fn: unknown, ids: string[]) => {
       expect(ids).toEqual(["picker-value", "picker-instructions"]);
+      const describedValue = descriptionLagReads-- > 0 ? Math.max(0, value - 1) : value;
       const descriptions = options.descriptionTexts ?? [
-        `${options.actualVersion ?? (value === 4 ? options.versionAtMax : undefined) ?? version} ${options.effortLabels?.[value] ?? (value === 4 ? "Pro" : "Instant")}，第 ${value + 1} 项，共 ${options.max === undefined ? 5 : options.max + 1} 项。`,
+        `${options.actualVersion ?? (value === 4 ? options.versionAtMax : undefined) ?? version} ${options.effortLabels?.[describedValue] ?? (describedValue === 4 ? "Pro" : "Instant")}，第 ${value + 1} 项，共 ${options.max === undefined ? 5 : options.max + 1} 项。`,
         observedPicker.descriptions["picker-instructions"],
       ];
       const previousDocument = (globalThis as any).document;
@@ -153,6 +176,71 @@ test.each(["5.6", "5.5"])("explicit Pro version %s is selected before effort", a
   expect(fixture.actions[0]).toBe("open-versions");
   expect(fixture.actions[1]).toBe(`selected:${version}`);
   expect(fixture.actions.slice(2)).toEqual(Array(4).fill(`${version}:ArrowRight`));
+});
+
+test.each([
+  ["5.6", "max", 4], ["5.5", "max", 4], ["5.6", "xhigh", 3],
+] as const)("Latest rendering 5.6 is explicitly pinned through inert rows for %s %s", async (version, effort, index) => {
+  const fixture = picker({
+    initialVersion: "5.6", checkedFamily: "6", latestRoutesToSixAtPro: true,
+    familyRowsVisible: true, familyRowsInertWhenCollapsed: true,
+    effortLabels: ["Instant", "Medium", "High", "Extra High", "Pro"],
+  });
+  await fixture.select(version, effort, version);
+  await fixture.send(version, effort, true);
+  expect(fixture.actions.slice(0, 2)).toEqual(["open-versions", `selected:${version}`]);
+  expect(fixture.submittedStates).toEqual([{ version, value: index }]);
+});
+
+test("an already-open actionable family list does not need its trigger clicked", async () => {
+  const fixture = picker({ familyRowsVisible: true, versionTriggerUnavailable: true });
+  await fixture.select("5.6");
+  expect(fixture.actions[0]).toBe("selected:5.6");
+  expect(fixture.actions).not.toContain("open-versions");
+});
+
+test("an exact checked hidden family is reused without reopening the inert list", async () => {
+  const fixture = picker({
+    initialVersion: "5.6", checkedFamily: "5.6", familyRowsInertWhenCollapsed: true,
+    versionTriggerUnavailable: true,
+  });
+  await fixture.select("5.6");
+  await fixture.send("5.6");
+  expect(fixture.actions).not.toContain("selected:5.6");
+  expect(fixture.actions).not.toContain("open-versions");
+});
+
+test("duplicate exact family rows cannot authorize selection or effort changes", async () => {
+  const fixture = picker({ initialVersion: "5.6", modelOptions: [...observedPicker.options,
+    { role: "menuitemradio", name: "GPT-5.6 Sol", version: "5.6" }],
+  });
+  await expect(fixture.select("5.6")).rejects.toThrow("5.6");
+  expect(fixture.actions).toEqual([]);
+});
+
+test("numeric effort may precede its described state by a bounded update", async () => {
+  const fixture = picker({ initialVersion: "5.6", descriptionLagReads: 2 });
+  await fixture.select("5.6");
+  await fixture.send("5.6");
+  expect(fixture.submittedStates).toEqual([{ version: "5.6", value: 4 }]);
+});
+
+test("freshly selected family checked state may settle before changing effort", async () => {
+  const fixture = picker({ checkedStateLagReads: 2 });
+  await fixture.select("5.6");
+  expect(fixture.state()).toEqual({ version: "5.6", value: 4 });
+});
+
+test("a described state that never settles still fails without sending", async () => {
+  const fixture = picker({ initialVersion: "5.6", descriptionLagReads: Infinity });
+  await expect(fixture.select("5.6")).rejects.toThrow("5.6");
+  expect(fixture.submittedStates).toEqual([]);
+});
+
+test("an unchecked selected family cannot advance to effort selection", async () => {
+  const fixture = picker({ checkedStateLagReads: Infinity });
+  await expect(fixture.select("5.6")).rejects.toThrow("5.6");
+  expect(fixture.actions).toEqual(["open-versions", "selected:5.6"]);
 });
 
 

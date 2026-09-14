@@ -253,23 +253,28 @@ async function assertChatGptSelectedModelVersion(
   version: ChatGptWebCompactionModelVersion | undefined,
   requirePro = false,
   expectedEffort?: ChatGptWebModelMode["effort"],
+  settleMs = 0,
 ): Promise<void> {
   // The numeric slider is aria-hidden. Its keyboard menuitem owns the live spoken
   // version/effort through aria-describedby, not aria-valuetext on the slider.
-  const keyboardControl = slider.locator("xpath=ancestor::*[@role='menuitem'][1]");
-  const descriptionIds = (await keyboardControl.getAttribute("aria-describedby"))?.trim().split(/\s+/).filter(Boolean) ?? [];
-  const descriptions = await page.evaluate(
-    ids => ids
-      .map(id => document.getElementById(id)?.textContent?.trim() ?? "")
-      .filter(Boolean),
-    descriptionIds,
-  );
+  const deadline = Date.now() + settleMs;
+  for (;;) {
+    const keyboardControl = slider.locator("xpath=ancestor::*[@role='menuitem'][1]");
+    const descriptionIds = (await keyboardControl.getAttribute("aria-describedby"))?.trim().split(/\s+/).filter(Boolean) ?? [];
+    const descriptions = await page.evaluate(
+      ids => ids
+        .map(id => document.getElementById(id)?.textContent?.trim() ?? "")
+        .filter(Boolean),
+      descriptionIds,
+    );
+    if (chatGptModelStateMatches(descriptions, version, requirePro, expectedEffort)) return;
+    if (Date.now() >= deadline) break;
+    await new Promise(resolveSettle => setTimeout(resolveSettle, 50));
+  }
   // Version and Pro must come from the same described state node: unrelated instructions
   // mentioning Pro are not proof that the selected effort is actually Pro.
-  if (!chatGptModelStateMatches(descriptions, version, requirePro, expectedEffort)) {
-    if (version) throw chatGptPinnedModelError(version);
-    throw chatGptModelControlUnavailableAdapterError("The live selector does not prove the requested summary effort");
-  }
+  if (version) throw chatGptPinnedModelError(version);
+  throw chatGptModelControlUnavailableAdapterError("The live selector does not prove the requested summary effort");
 }
 
 export type ChatGptPersonalizationPreflight = "already-personalized" | "enabled";
@@ -2436,25 +2441,36 @@ export class ChatGptBrowserWorker {
     const modelVersion = stageModelVersion ?? mode.modelVersion;
     if (modelVersion) {
       try {
-        let familyVerified = false;
-        try {
-          await assertChatGptSelectedModelVersion(page, activation.slider, modelVersion);
-          familyVerified = true;
-        } catch (error) {
-          if (!(error instanceof ChatGptWebAdapterError) || error.code !== "model_version_unavailable") throw error;
-        }
-        // Multipart staging changes effort, not family. An already verified family must not
-        // depend on reopening a model submenu after prior messages have been accepted.
-        // Missing/mismatched proof still requires exact selection and fresh verification.
-        if (!familyVerified) {
-          await activation.menu.getByLabel(/^(?:Select model|Choose model|选择模型|モデルを選択)$/).click({ timeout: 5_000 });
-          const modelName = chatGptProModelOptionName(modelVersion);
-          const option = activation.menu.getByRole("menuitemradio", { name: modelName, exact: true });
+        const modelName = chatGptProModelOptionName(modelVersion);
+        // A rendered 5.6 label is not a pin: Latest also renders 5.6 at lower efforts,
+        // then switches to 6 at Pro. Only the owned exact radio's checked state proves
+        // the selected family. Hidden attached radios remain authoritative for reads.
+        let option = activation.menu.getByRole("menuitemradio", { name: modelName, exact: true, includeHidden: true });
+        const optionCount = await option.count();
+        if (optionCount > 1) throw chatGptPinnedModelError(modelVersion);
+        const familyPinned = optionCount === 1 && await option.getAttribute("aria-checked") === "true";
+        if (!familyPinned) {
+          // Collapsed advanced-view rows still have visible geometry, but are inert.
+          // Respect the owned trigger's state before relying on row visibility.
+          const modelTrigger = activation.menu.getByLabel(/^(?:Select model|Choose model|选择模型|モデルを選択)$/);
+          const modelMenuCollapsed = await modelTrigger.count() === 1
+            && await modelTrigger.getAttribute("aria-expanded") === "false";
+          if (modelMenuCollapsed || !await option.isVisible().catch(() => false)) {
+            await modelTrigger.click({ timeout: 5_000 });
+          }
           await option.waitFor({ state: "visible", timeout: 5_000 });
           await option.click({ timeout: 5_000 });
           await page.keyboard.press("Escape");
           activation = await activateChatGptEffortMenu(page, currentEffort);
-          await assertChatGptSelectedModelVersion(page, activation.slider, modelVersion);
+          option = activation.menu.getByRole("menuitemradio", { name: modelName, exact: true, includeHidden: true });
+          const pinDeadline = Date.now() + 1_000;
+          for (;;) {
+            const count = await option.count();
+            if (count > 1) throw chatGptPinnedModelError(modelVersion);
+            if (count === 1 && await option.getAttribute("aria-checked") === "true") break;
+            if (Date.now() >= pinDeadline) throw chatGptPinnedModelError(modelVersion);
+            await new Promise(resolveSettle => setTimeout(resolveSettle, 50));
+          }
         }
       } catch (error) {
         throw chatGptPinnedModelError(modelVersion, error);
@@ -2544,7 +2560,11 @@ export class ChatGptBrowserWorker {
         );
       }
     }
-    if (modelVersion) await assertChatGptSelectedModelVersion(page, effortSlider, modelVersion, mode.effort === "max");
+    if (modelVersion) {
+      // React can update the numeric slider before its described state. Read until both
+      // the requested family and effort are proved; never re-click or send to repair it.
+      await assertChatGptSelectedModelVersion(page, effortSlider, modelVersion, mode.effort === "max", mode.effort, 1_000);
+    }
     await captureDiagnostic?.("effort-selected");
     await page.keyboard.press("Escape");
     return mode;
