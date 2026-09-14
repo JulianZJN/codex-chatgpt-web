@@ -224,16 +224,25 @@ function chatGptModelStateMatches(
   descriptions: readonly string[],
   version: ChatGptWebProModelVersion,
   requirePro: boolean,
+  expectedEffort?: ChatGptWebModelMode["effort"],
 ): boolean {
-  const escapedVersion = version.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  const versionPrefix = new RegExp(
-    `^(?:GPT[-\\s]?)?${escapedVersion}(?=$|\\s|[,，:：;；()（）·•—–-])`,
-    "i",
-  );
-  return descriptions.some(description => {
-    const normalized = description.replace(/\s+/g, " ").trim();
-    return versionPrefix.test(normalized)
-      && (!requirePro || /\bPro\b/i.test(normalized));
+  // Parse each state independently before applying the pin. Filtering by the requested
+  // family first would hide contradictory state nodes (for example both 5.6 Pro and 6 Pro).
+  const statePrefix = /^(?:GPT[-\s]?)?(\d+(?:\.\d+)?)(?:\s+(Sol|Astra))?\s+(Instant|Medium|Extra High|High|即时|中|极高|高|Pro)(?=\s*(?:[,，]|$))/i;
+  const states = descriptions.flatMap(description => {
+    const state = statePrefix.exec(description.replace(/\s+/g, " ").trim());
+    return state ? [{ version: state[1]!, family: state[2]?.toLowerCase(), effort: state[3]!.toLowerCase() }] : [];
+  });
+  const labels: Record<ChatGptWebModelMode["effort"], readonly string[]> = {
+    low: ["instant", "即时"], medium: ["medium", "中"], high: ["high", "高"],
+    xhigh: ["extra high", "极高"], max: ["pro"],
+  };
+  return states.length > 0 && states.every(state => {
+    if (!["5.5", "5.6", "6"].includes(state.version)) return false;
+    if (state.version !== version) return false;
+    if (state.family && state.family !== (state.version === "5.6" ? "sol" : state.version === "6" ? "astra" : undefined)) return false;
+    if (expectedEffort !== undefined) return labels[expectedEffort].includes(state.effort);
+    return !requirePro || state.effort === "pro";
   });
 }
 
@@ -242,23 +251,29 @@ async function assertChatGptSelectedModelVersion(
   slider: Locator,
   version: ChatGptWebProModelVersion,
   requirePro = false,
+  expectedEffort?: ChatGptWebModelMode["effort"],
+  settleMs = 0,
 ): Promise<void> {
   // The numeric slider is aria-hidden. Its keyboard menuitem owns the live spoken
   // version/effort through aria-describedby, not aria-valuetext on the slider.
-  const keyboardControl = slider.locator("xpath=ancestor::*[@role='menuitem'][1]");
-  const descriptionIds = (await keyboardControl.getAttribute("aria-describedby"))?.trim().split(/\s+/).filter(Boolean) ?? [];
-  const descriptions = await page.evaluate(
-    ids => ids
-      .map(id => document.getElementById(id)?.textContent?.trim() ?? "")
-      .filter(Boolean),
-    descriptionIds,
-  );
+  const deadline = Date.now() + settleMs;
+  for (;;) {
+    const keyboardControl = slider.locator("xpath=ancestor::*[@role='menuitem'][1]");
+    const descriptionIds = (await keyboardControl.getAttribute("aria-describedby"))?.trim().split(/\s+/).filter(Boolean) ?? [];
+    const descriptions = await page.evaluate(
+      ids => ids
+        .map(id => document.getElementById(id)?.textContent?.trim() ?? "")
+        .filter(Boolean),
+      descriptionIds,
+    );
+    if (chatGptModelStateMatches(descriptions, version, requirePro, expectedEffort)) return;
+    if (Date.now() >= deadline) break;
+    await new Promise(resolveSettle => setTimeout(resolveSettle, 50));
+  }
   // "Latest" is not a version. Its slider must still prove 6; a future 7 fails closed.
   // Version and Pro must come from the same described state node: unrelated instructions
   // mentioning Pro are not proof that the selected effort is actually Pro.
-  if (!chatGptModelStateMatches(descriptions, version, requirePro)) {
-    throw chatGptPinnedModelError(version);
-  }
+  throw chatGptPinnedModelError(version);
 }
 
 export type ChatGptPersonalizationPreflight = "already-personalized" | "enabled";
@@ -2422,14 +2437,37 @@ export class ChatGptBrowserWorker {
     const modelVersion = stageModelVersion ?? mode.modelVersion;
     if (modelVersion) {
       try {
-        await activation.menu.getByLabel(/^(?:Select model|Choose model|选择模型|モデルを選択)$/).click({ timeout: 5_000 });
         const modelName = chatGptProModelOptionName(modelVersion);
-        const option = activation.menu.getByRole("menuitemradio", { name: modelName, exact: true });
-        await option.waitFor({ state: "visible", timeout: 5_000 });
-        await option.click({ timeout: 5_000 });
-        await page.keyboard.press("Escape");
-        activation = await activateChatGptEffortMenu(page, currentEffort);
-        await assertChatGptSelectedModelVersion(page, activation.slider, modelVersion);
+        // A rendered 5.6 label is not a pin: Latest also renders 5.6 at lower efforts,
+        // then switches to 6 at Pro. Only the owned exact radio's checked state proves
+        // the selected family. Hidden attached radios remain authoritative for reads.
+        let option = activation.menu.getByRole("menuitemradio", { name: modelName, exact: true, includeHidden: true });
+        const optionCount = await option.count();
+        if (optionCount > 1) throw chatGptPinnedModelError(modelVersion);
+        const familyPinned = optionCount === 1 && await option.getAttribute("aria-checked") === "true";
+        if (!familyPinned) {
+          // Collapsed advanced-view rows still have visible geometry, but are inert.
+          // Respect the owned trigger's state before relying on row visibility.
+          const modelTrigger = activation.menu.getByLabel(/^(?:Select model|Choose model|选择模型|モデルを選択)$/);
+          const modelMenuCollapsed = await modelTrigger.count() === 1
+            && await modelTrigger.getAttribute("aria-expanded") === "false";
+          if (modelMenuCollapsed || !await option.isVisible().catch(() => false)) {
+            await modelTrigger.click({ timeout: 5_000 });
+          }
+          await option.waitFor({ state: "visible", timeout: 5_000 });
+          await option.click({ timeout: 5_000 });
+          await page.keyboard.press("Escape");
+          activation = await activateChatGptEffortMenu(page, currentEffort);
+          option = activation.menu.getByRole("menuitemradio", { name: modelName, exact: true, includeHidden: true });
+          const pinDeadline = Date.now() + 1_000;
+          for (;;) {
+            const count = await option.count();
+            if (count > 1) throw chatGptPinnedModelError(modelVersion);
+            if (count === 1 && await option.getAttribute("aria-checked") === "true") break;
+            if (Date.now() >= pinDeadline) throw chatGptPinnedModelError(modelVersion);
+            await new Promise(resolveSettle => setTimeout(resolveSettle, 50));
+          }
+        }
       } catch (error) {
         throw chatGptPinnedModelError(modelVersion, error);
       }
@@ -2512,7 +2550,7 @@ export class ChatGptBrowserWorker {
         );
       }
     }
-    if (modelVersion) await assertChatGptSelectedModelVersion(page, effortSlider, modelVersion, mode.effort === "max");
+    if (modelVersion) await assertChatGptSelectedModelVersion(page, effortSlider, modelVersion, mode.effort === "max", mode.effort, 1_000);
     await captureDiagnostic?.("effort-selected");
     await page.keyboard.press("Escape");
     return mode;
@@ -3451,7 +3489,7 @@ export class ChatGptBrowserWorker {
       let verificationError: ChatGptWebAdapterError | undefined;
       try {
         const { slider } = await activateChatGptEffortMenu(page, control);
-        await assertChatGptSelectedModelVersion(page, slider, expectedMode.modelVersion, expectedMode.effort === "max");
+        await assertChatGptSelectedModelVersion(page, slider, expectedMode.modelVersion, expectedMode.effort === "max", expectedMode.effort);
         const state = parseChatGptEffortSliderState(
           await slider.getAttribute("aria-valuemin"), await slider.getAttribute("aria-valuemax"),
           await slider.getAttribute("aria-valuenow"),

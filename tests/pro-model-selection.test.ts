@@ -13,9 +13,22 @@ function picker(options: {
   actualVersion?: string;
   max?: number;
   descriptionTexts?: readonly string[];
+  effortLabels?: readonly string[];
+  versionAtMax?: string;
   modelOptions?: Array<{ role: string; name: string; version: string }>;
+  initialVersion?: string;
+  versionTriggerUnavailable?: boolean;
+  checkedFamily?: string;
+  latestRoutesToSixAtPro?: boolean;
+  familyRowsVisible?: boolean;
+  familyRowsInertWhenCollapsed?: boolean;
+  descriptionLagReads?: number;
+  checkedStateLagReads?: number;
 } = {}) {
-  let version = "6", value = 0, submenu = false;
+  let version = options.initialVersion ?? "6", value = 0, submenu = false;
+  let checkedFamily = options.checkedFamily ?? options.initialVersion ?? "6";
+  let descriptionLagReads = 0;
+  let checkedStateLagReads = 0;
   let keyboardFailure: string | undefined;
   const actions: string[] = [];
   const hidden = {
@@ -30,6 +43,8 @@ function picker(options: {
     press: async (key: string) => {
     actions.push(`${version}:${key}`);
     value += key === "ArrowRight" ? 1 : -1;
+    descriptionLagReads = options.descriptionLagReads ?? 0;
+    if (options.latestRoutesToSixAtPro && checkedFamily === "6") version = value === 4 ? "6" : "5.6";
   } };
   const slider = {
     waitFor: async () => {},
@@ -50,17 +65,32 @@ function picker(options: {
   };
   const versionTrigger = {
     count: async () => 1, waitFor: async () => {},
-    click: async () => { submenu = true; actions.push("open-versions"); },
+    getAttribute: async (name: string) => name === "aria-expanded"
+      ? String(submenu || (!options.familyRowsInertWhenCollapsed && options.familyRowsVisible !== false)) : null,
+    click: async () => {
+      if (options.versionTriggerUnavailable) throw new Error("family picker is unavailable in this menu state");
+      submenu = true; actions.push("open-versions");
+    },
   };
   const modelOptions = options.modelOptions ?? observedPicker.options;
   const radio = (name: string | RegExp) => {
-    const option = modelOptions.find(option => typeof name === "string" ? option.name === name : name.test(option.name));
+    const matches = modelOptions.filter(option => typeof name === "string" ? option.name === name : name.test(option.name));
+    const option = matches[0];
     return {
-    count: async () => options.unavailable ? 0 : 1,
+    filter() { return this; },
+    isVisible: async () => !options.unavailable && !!option && (options.familyRowsVisible !== false || submenu),
+    count: async () => options.unavailable ? 0 : matches.length,
     waitFor: async () => { if (options.unavailable || !option) throw new Error("missing version"); },
-    getAttribute: async (attribute: string) => attribute === "aria-checked" ? "false" : null,
+    getAttribute: async (attribute: string) => {
+      if (attribute !== "aria-checked") return null;
+      if (checkedStateLagReads-- > 0) return "false";
+      return String(checkedFamily === option?.version);
+    },
     click: async () => {
-      if (options.unavailable || !submenu || !option) throw new Error("unavailable version");
+      if (options.familyRowsInertWhenCollapsed && !submenu) throw new Error("model row is inert despite visible geometry");
+      if (options.unavailable || (options.familyRowsVisible === false && !submenu) || !option) throw new Error("unavailable version");
+      checkedFamily = option.version;
+      checkedStateLagReads = options.checkedStateLagReads ?? 0;
       version = option.version;
       value = 0; submenu = false; actions.push(`selected:${version}`);
     },
@@ -72,8 +102,9 @@ function picker(options: {
       if (!name.test(observedPicker.triggerLabel)) throw new Error("model trigger does not match observed label");
       return versionTrigger;
     },
-    getByRole: (role: string, args: { name: string | RegExp; exact: boolean }) => {
+    getByRole: (role: string, args: { name: string | RegExp; exact: boolean; includeHidden?: boolean }) => {
       if (role !== "menuitemradio" || !args.exact) throw new Error("expected exact model radio");
+      if (options.familyRowsVisible === false && !submenu && args.includeHidden !== true) return hidden;
       return radio(args.name);
     },
   };
@@ -81,8 +112,9 @@ function picker(options: {
   const page = {
     evaluate: async (fn: unknown, ids: string[]) => {
       expect(ids).toEqual(["picker-value", "picker-instructions"]);
+      const describedValue = descriptionLagReads-- > 0 ? Math.max(0, value - 1) : value;
       const descriptions = options.descriptionTexts ?? [
-        `${options.actualVersion ?? version} ${value === 4 ? "Pro" : "Instant"}，第 ${value + 1} 项，共 5 项。`,
+        `${options.actualVersion ?? (value === 4 ? options.versionAtMax : undefined) ?? version} ${options.effortLabels?.[describedValue] ?? ["Instant", "Medium", "High", "Extra High", "Pro"][describedValue]}，第 ${value + 1} 项，共 ${options.max === undefined ? 5 : options.max + 1} 项。`,
         observedPicker.descriptions["picker-instructions"],
       ];
       const previousDocument = (globalThis as any).document;
@@ -119,7 +151,7 @@ function picker(options: {
       { localToolsEnabled: false, solAvailable: true, proAvailable: true, proModelVersion: requested },
       undefined, stageVersion,
     ),
-    send: async (requested: string) => {
+    send: async (requested: string | undefined, effort = "max") => {
       const send = (ChatGptBrowserWorker.prototype as unknown as {
         sendAttachedPrompt(...args: unknown[]): Promise<unknown>;
       }).sendAttachedPrompt;
@@ -130,13 +162,13 @@ function picker(options: {
       return send.call({ activeComposer: async () => ({ locator: () => form }),
         waitForSubmissionAcceptedWithRecovery: async () => "user_turn",
       }, page, {}, undefined, undefined, undefined, undefined, undefined, undefined,
-      { modelVersion: requested, effort: "max", uiEffortIndex: 4 });
+      { modelVersion: requested, effort, uiEffortIndex: effort === "xhigh" ? 3 : 4 });
     },
   };
 }
 
 test.each(["5.6", "5.5", "6"])("explicit Pro version %s is selected before effort", async version => {
-  const fixture = picker();
+  const fixture = picker({ initialVersion: "unselected", familyRowsVisible: false });
   await fixture.select(version);
   expect(fixture.state()).toEqual({ version, value: 4 });
   expect(fixture.actions[0]).toBe("open-versions");
@@ -146,6 +178,7 @@ test.each(["5.6", "5.5", "6"])("explicit Pro version %s is selected before effor
 
 test("an explicit GPT-6 Astra option is accepted without weakening version proof", async () => {
   const fixture = picker({
+    initialVersion: "5.6",
     modelOptions: [
       { role: "menuitemradio", name: "GPT-6 Astra", version: "6" },
       ...observedPicker.options.filter(option => option.version !== "6"),
@@ -157,6 +190,7 @@ test("an explicit GPT-6 Astra option is accepted without weakening version proof
 
 test("nearby GPT-6 labels are not accepted as the pinned model", async () => {
   const fixture = picker({
+    initialVersion: "5.6",
     modelOptions: [
       { role: "menuitemradio", name: "GPT-6 Mini", version: "6" },
       ...observedPicker.options.filter(option => option.version !== "6"),
@@ -167,6 +201,7 @@ test("nearby GPT-6 labels are not accepted as the pinned model", async () => {
 
 test("model-state verification is independent of aria-describedby order", async () => {
   const fixture = picker({
+    initialVersion: "5.6",
     descriptionTexts: [
       observedPicker.descriptions["picker-instructions"],
       "5.6 Pro，第 5 项，共 5 项。",
@@ -174,6 +209,25 @@ test("model-state verification is independent of aria-describedby order", async 
   });
   await fixture.select("5.6");
   expect(fixture.state()).toEqual({ version: "5.6", value: 4 });
+});
+
+test("a verified family survives the multipart effort change without reopening its model submenu", async () => {
+  const fixture = picker({
+    initialVersion: "5.6",
+    versionTriggerUnavailable: true,
+    effortLabels: ["Instant", "Medium", "High", "Extra High", "Pro"],
+  });
+  await fixture.select("5.6", "xhigh", "5.6");
+  expect(fixture.state()).toEqual({ version: "5.6", value: 3 });
+  expect(fixture.actions).toEqual(Array(3).fill("5.6:ArrowRight"));
+  await fixture.send("5.6", "xhigh");
+  expect(fixture.actions.filter(action => action === "SEND")).toHaveLength(1);
+});
+
+test("an unavailable family menu cannot bypass a mismatched pin", async () => {
+  const fixture = picker({ initialVersion: "6", versionTriggerUnavailable: true, familyRowsVisible: false });
+  await expect(fixture.select("5.6", "xhigh", "5.6")).rejects.toThrow("5.6");
+  expect(fixture.actions).toEqual([]);
 });
 
 test("an unrelated instruction mentioning Pro cannot validate an Instant state", async () => {
@@ -184,6 +238,31 @@ test("an unrelated instruction mentioning Pro cannot validate an Instant state",
     ],
   });
   await expect(fixture.select("5.6")).rejects.toThrow("5.6");
+});
+
+test.each([
+  ["5.6", "5.6 Instant，第 1 项，共 5 项。 Choose Pro for the most difficult tasks."],
+  ["5.6", "5.6 High, choose Pro for difficult tasks."],
+  ["5.6", "5.6 Pro is unavailable; choose another mode."],
+  ["5.6", "5.6 Pro Max，第 5 项，共 5 项。"],
+  ["6", "6 Mini Pro，第 5 项，共 5 项。"],
+  ["6", "6.1 Pro，第 5 项，共 5 项。"],
+])("a non-Pro or unknown state cannot authorize pinned %s even at slider position 4: %s", async (version, state) => {
+  const fixture = picker({ descriptionTexts: [state] });
+  fixture.setEffort(4);
+  await expect(fixture.send(version)).rejects.toThrow(version);
+  expect(fixture.actions).not.toContain("SEND");
+});
+
+test.each([
+  ["5.6", "GPT-5.6 Sol Pro，第 5 项，共 5 项。"],
+  ["5.5", "GPT 5.5 Pro, item 5 of 5."],
+  ["6", "GPT-6 Astra Pro, item 5 of 5."],
+])("an exact pinned %s family and Pro state authorizes one send: %s", async (version, state) => {
+  const fixture = picker({ descriptionTexts: [state] });
+  fixture.setEffort(4);
+  await fixture.send(version);
+  expect(fixture.actions.filter(action => action === "SEND")).toHaveLength(1);
 });
 
 test("a missing version stops before any effort or submission can proceed", async () => {
@@ -229,6 +308,37 @@ test("a verified 5.6 Pro selection permits one send", async () => {
   expect(fixture.actions.filter(action => action === "SEND")).toHaveLength(1);
 });
 
+// Localized labels observed in the installed zh-CN picker; availability can vary.
+const chineseEffortLabels = ["即时", "中", "高", "极高", "Pro"];
+
+test("localized intermediate effort names do not reject a verified 5.6 Pro", async () => {
+  const fixture = picker({ effortLabels: chineseEffortLabels });
+  await fixture.select("5.6");
+  await fixture.send("5.6");
+  expect(fixture.actions.filter(action => action === "SEND")).toHaveLength(1);
+});
+
+test.each(chineseEffortLabels.slice(0, 4))("Chinese effort %s cannot authorize a Pro send", async label => {
+  const fixture = picker({ descriptionTexts: [`5.6 ${label}，第 5 项，共 5 项。请使用 Pro。`] });
+  fixture.setEffort(4);
+  await expect(fixture.send("5.6")).rejects.toThrow("5.6");
+  expect(fixture.actions).not.toContain("SEND");
+});
+
+test("a four-level localized pinned picker reports missing Pro without sending", async () => {
+  const fixture = picker({ max: 3, effortLabels: chineseEffortLabels });
+  await expect(fixture.select("5.6")).rejects.toThrow("ChatGPT model controls are unavailable");
+  expect(fixture.actions.filter(action => action.includes("ArrowRight"))).toHaveLength(0);
+  expect(fixture.actions).not.toContain("SEND");
+});
+
+test("moving the slider to Pro must not silently switch a pinned 5.6 request to 6", async () => {
+  const fixture = picker({ effortLabels: chineseEffortLabels, versionAtMax: "6" });
+  await expect(fixture.select("5.6")).rejects.toThrow("5.6");
+  expect(fixture.actions.filter(action => action.includes("ArrowRight"))).toHaveLength(4);
+  expect(fixture.actions).not.toContain("SEND");
+});
+
 test("an effort reset to non-Pro prevents the send even when the version still matches", async () => {
   const fixture = picker();
   await fixture.select("5.6");
@@ -252,4 +362,116 @@ test("an ordinary non-Pro route and a legacy unpinned route do not select a vers
   await legacy.select(undefined);
   expect(legacy.state()).toEqual({ version: "6", value: 4 });
   expect(legacy.actions).not.toContain("open-versions");
+});
+
+test("a four-level 5.6 picker supports a pinned non-Pro preparation stage", async () => {
+  const fixture = picker({ max: 3, effortLabels: chineseEffortLabels });
+  await fixture.select("5.6", "xhigh", "5.6");
+  await fixture.send("5.6", "xhigh");
+  expect(fixture.state()).toEqual({ version: "5.6", value: 3 });
+  expect(fixture.actions.filter(action => action === "SEND")).toHaveLength(1);
+});
+
+test.each(["5.6 Pro，第 4 项，共 5 项。", "5.6 High，第 4 项，共 5 项。"])(
+  "pinned Extra High rejects a conflicting spoken effort even at position 3: %s", async state => {
+    const fixture = picker({ descriptionTexts: [state] });
+    fixture.setEffort(3);
+    await expect(fixture.send("5.6", "xhigh")).rejects.toThrow();
+    expect(fixture.actions).not.toContain("SEND");
+  },
+);
+
+
+test("Latest rendering 5.6 must be explicitly pinned before requesting 5.6 Pro", async () => {
+  const fixture = picker({
+    initialVersion: "5.6", checkedFamily: "6", latestRoutesToSixAtPro: true,
+    versionTriggerUnavailable: true,
+  });
+  await fixture.select("5.6");
+  await fixture.send("5.6");
+  expect(fixture.state()).toEqual({ version: "5.6", value: 4 });
+  expect(fixture.actions).toContain("selected:5.6");
+  expect(fixture.actions).not.toContain("open-versions");
+  expect(fixture.actions.filter(action => action === "SEND")).toHaveLength(1);
+});
+
+test.each([
+  ["5.6", "max", 4], ["5.5", "max", 4], ["5.6", "xhigh", 3],
+] as const)("collapsed inert rows are opened before selecting %s %s", async (version, effort, index) => {
+  const fixture = picker({
+    initialVersion: "5.6", checkedFamily: "6", latestRoutesToSixAtPro: true,
+    familyRowsInertWhenCollapsed: true,
+    effortLabels: ["Instant", "Medium", "High", "Extra High", "Pro"],
+  });
+  await fixture.select(version, effort, version);
+  await fixture.send(version, effort);
+  expect(fixture.actions.slice(0, 2)).toEqual(["open-versions", `selected:${version}`]);
+  expect(fixture.state()).toEqual({ version, value: index });
+  expect(fixture.actions.filter(action => action === "SEND")).toHaveLength(1);
+});
+
+test("an explicitly checked 5.6 family is reused without selecting it again", async () => {
+  const fixture = picker({
+    initialVersion: "5.6", checkedFamily: "5.6", latestRoutesToSixAtPro: true,
+    versionTriggerUnavailable: true, familyRowsVisible: false, familyRowsInertWhenCollapsed: true,
+  });
+  await fixture.select("5.6");
+  await fixture.send("5.6");
+  expect(fixture.state()).toEqual({ version: "5.6", value: 4 });
+  expect(fixture.actions).not.toContain("selected:5.6");
+  expect(fixture.actions).not.toContain("open-versions");
+});
+
+test("Latest rendering 5.6 at low still supports the ordinary GPT-6 Pro route", async () => {
+  const fixture = picker({
+    initialVersion: "5.6", checkedFamily: "6", latestRoutesToSixAtPro: true,
+    versionTriggerUnavailable: true, familyRowsVisible: false,
+  });
+  await fixture.select("6");
+  await fixture.send("6");
+  expect(fixture.state()).toEqual({ version: "6", value: 4 });
+  expect(fixture.actions).not.toContain("selected:6");
+});
+
+test("an asynchronous described effort converges after the numeric Pro slider changes", async () => {
+  const fixture = picker({ initialVersion: "5.6", checkedFamily: "5.6", descriptionLagReads: 2 });
+  await fixture.select("5.6");
+  await fixture.send("5.6");
+  expect(fixture.actions.filter(action => action === "SEND")).toHaveLength(1);
+});
+
+test("a freshly clicked model radio may settle its checked state before effort selection", async () => {
+  const fixture = picker({ initialVersion: "6", checkedFamily: "6", checkedStateLagReads: 2 });
+  await fixture.select("5.6");
+  await fixture.send("5.6");
+  expect(fixture.actions.filter(action => action === "selected:5.6")).toHaveLength(1);
+  expect(fixture.actions.filter(action => action === "SEND")).toHaveLength(1);
+});
+
+test("a described effort that never settles still prevents a pinned Pro send", async () => {
+  const fixture = picker({ initialVersion: "5.6", checkedFamily: "5.6", descriptionLagReads: Infinity });
+  await expect(fixture.select("5.6")).rejects.toThrow("5.6");
+  expect(fixture.actions).not.toContain("SEND");
+});
+
+test("a clicked family that never becomes checked fails before changing effort", async () => {
+  const fixture = picker({ initialVersion: "6", checkedFamily: "6", checkedStateLagReads: Infinity });
+  await expect(fixture.select("5.6")).rejects.toThrow("5.6");
+  expect(fixture.actions.filter(action => action.includes("ArrowRight"))).toHaveLength(0);
+  expect(fixture.actions).not.toContain("SEND");
+});
+
+test("duplicate exact model rows cannot prove a reusable pin", async () => {
+  const fixture = picker({ initialVersion: "5.6", modelOptions: [...observedPicker.options,
+    { role: "menuitemradio", name: "GPT-5.6 Sol", version: "5.6" }],
+  });
+  await expect(fixture.select("5.6")).rejects.toThrow("5.6");
+  expect(fixture.actions).toEqual([]);
+});
+
+test("contradictory described model states cannot authorize a Pro send", async () => {
+  const fixture = picker({ descriptionTexts: ["5.6 Pro, item 5 of 5.", "6 Pro, item 5 of 5."] });
+  fixture.setEffort(4);
+  await expect(fixture.send("5.6")).rejects.toThrow("5.6");
+  expect(fixture.actions).not.toContain("SEND");
 });
